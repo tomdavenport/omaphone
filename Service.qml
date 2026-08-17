@@ -26,6 +26,7 @@ Item {
         "remoteAddress": "",
         "groupCall": false,
         "roomSize": 0,
+        "relayReady": false,
         "localTalking": false,
         "remoteTalking": false,
         "messages": [],
@@ -104,12 +105,16 @@ Item {
             "remoteAddress": String(parsed.remoteAddress || ""),
             "groupCall": parsed.groupCall === true,
             "roomSize": safeRoomSize,
+            "relayReady": parsed.relayReady === true && String(parsed.phase || "") === "relay",
             "localTalking": parsed.localTalking === true,
             "remoteTalking": parsed.remoteTalking === true,
             "messages": safeMessages,
             "settings": safeSettings,
             "lastError": String(parsed.lastError || "")
         };
+        if (notice === "Starting group host…" && (phoneStatus.relayReady === true || String(phoneStatus.phase || "") !== "relay"))
+            notice = "";
+
         statusLoaded = true;
         statusReadError = "";
         if (!pttProcess.running) {
@@ -152,7 +157,7 @@ Item {
             return "Calling…";
 
         if (kind === "pair")
-            return "Invite used — your call key changed";
+            return onlineState ? "Invite ready — choose Call to connect" : "Invite ready — go online, then choose Call";
 
         if (kind === "audio-test")
             return "Audio test started";
@@ -161,7 +166,7 @@ Item {
             return "Ending call…";
 
         if (kind === "relay")
-            return "Group hosting started";
+            return phoneStatus.relayReady === true ? "" : "Starting group host…";
 
         if (kind === "rotate")
             return "Changing your calling address…";
@@ -298,7 +303,11 @@ Item {
     }
 
     function copyInvite() {
-        if (commandBusy)
+        // A relay is a long-lived TerminalPhone session and therefore reports
+        // busy, but creating an invite only packages the room key that the
+        // supervisor already made for this session. Keep it available to the
+        // host while blocking overlapping helpers and every other busy phase.
+        if (actionBusy || clipboardBusy || (phoneStatus.busy === true && phase !== "relay"))
             return false;
 
         if (String(phoneStatus.onion || "") === "")

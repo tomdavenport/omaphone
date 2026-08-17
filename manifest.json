@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "omaphone.phone",
   "name": "Omaphone",
-  "version": "1.1.0",
+  "version": "1.1.1",
   "author": "Tom Davenport",
   "license": "MIT",
   "description": "A private walkie-talkie for calls, group rooms, and chat over Tor.",

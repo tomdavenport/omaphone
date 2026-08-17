@@ -626,6 +626,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
         first = omaphone.status_defaults()
         second = omaphone.status_defaults()
         self.assertEqual(first["settings"], omaphone.DEFAULT_SETTINGS)
+        self.assertIs(first["relayReady"], False)
         self.assertNotIn("secret", first)
         first["settings"]["hmac"] = not first["settings"]["hmac"]
         self.assertEqual(second["settings"], omaphone.DEFAULT_SETTINGS)
@@ -1329,6 +1330,181 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         for invalid in ("-1", str(omaphone.MAX_ROOM_SIZE + 1), "1.5", "true"):
             supervisor._handle_output_event(omaphone.OutputEvent("room_size", invalid))
             self.assertEqual(supervisor.status["roomSize"], omaphone.MAX_ROOM_SIZE)
+
+    def test_relay_ready_is_false_before_the_active_event(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("relay")
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "relay",
+            "relayReady": "stale",
+        }
+        supervisor.pending_text = None
+        supervisor._refresh_static = mock.Mock()
+        supervisor._write_pty = mock.Mock(return_value=True)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("relay_prompt"))
+
+        self.assertTrue(supervisor.invocation.relay_confirmed)
+        self.assertFalse(supervisor.invocation.relay_ready)
+        self.assertIs(supervisor.status["relayReady"], False)
+        persisted = json.loads(self.paths.status_file.read_text("utf-8"))
+        self.assertIs(persisted["relayReady"], False)
+
+    def test_relay_ready_is_true_after_the_active_relay_event(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("relay")
+        supervisor.status = {**omaphone.status_defaults(), "phase": "relay"}
+        supervisor.pending_text = None
+        supervisor._refresh_static = mock.Mock()
+
+        supervisor._handle_output_event(omaphone.OutputEvent("relay"))
+
+        self.assertTrue(supervisor.invocation.relay_ready)
+        self.assertIs(supervisor.status["relayReady"], True)
+        persisted = json.loads(self.paths.status_file.read_text("utf-8"))
+        self.assertIs(persisted["relayReady"], True)
+
+    def test_relay_ready_resets_when_the_relay_lifecycle_stops(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("relay")
+        supervisor.status = {**omaphone.status_defaults(), "phase": "relay"}
+        supervisor.pending_text = None
+        supervisor.pending_invocation = None
+        supervisor.stop_reason = ""
+        supervisor.stop_deadline = 0.0
+        supervisor.ptt_next = 0.0
+        supervisor.ptt_deadline = 0.0
+        supervisor._refresh_static = mock.Mock()
+        supervisor._write_pty = mock.Mock(return_value=True)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("relay"))
+        self.assertIs(supervisor.status["relayReady"], True)
+
+        supervisor._request_stop("offline")
+        supervisor._persist()
+
+        self.assertFalse(supervisor.invocation.relay_ready)
+        self.assertIs(supervisor.status["relayReady"], False)
+
+        # Buffered output cannot resurrect readiness after the lifecycle reset.
+        supervisor._handle_output_event(omaphone.OutputEvent("relay"))
+        self.assertFalse(supervisor.invocation.relay_ready)
+        self.assertIs(supervisor.status["relayReady"], False)
+        persisted = json.loads(self.paths.status_file.read_text("utf-8"))
+        self.assertIs(persisted["relayReady"], False)
+
+    def test_relay_invites_use_one_ephemeral_secret_per_ready_invocation(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.selector = mock.Mock()
+        supervisor.invocation = None
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "offline",
+            "configured": True,
+            "dependenciesReady": True,
+        }
+        supervisor.pending_text = None
+        supervisor.stop_reason = ""
+        supervisor.stop_deadline = 0.0
+        supervisor.ptt_next = 0.0
+        supervisor.ptt_deadline = 0.0
+        supervisor._refresh_static = mock.Mock()
+        supervisor._persist = mock.Mock()
+
+        with (
+            mock.patch.object(omaphone.pty, "fork", side_effect=[(101, 91), (102, 92)]),
+            mock.patch.object(omaphone.os, "set_blocking"),
+            mock.patch.object(omaphone.os, "urandom", side_effect=[b"a" * 32, b"b" * 32]),
+        ):
+            supervisor._start_invocation("relay")
+            first_invocation = supervisor.invocation
+            self.assertIsNotNone(first_invocation)
+            if first_invocation is None:  # pragma: no cover - assertion narrows the type
+                self.fail("relay invocation was not created")
+            self.assertTrue(omaphone.valid_secret(first_invocation.relay_secret))
+
+            not_ready = supervisor.dispatch({"command": "invite"})
+            self.assertFalse(not_ready["ok"])
+            self.assertNotIn("invite", not_ready)
+
+            first_invocation.relay_ready = True
+            first_copy = supervisor.dispatch({"command": "invite"})
+            second_copy = supervisor.dispatch({"command": "invite"})
+            first_secret = omaphone.parse_invite(first_copy["invite"]).secret
+            self.assertEqual(omaphone.parse_invite(second_copy["invite"]).secret, first_secret)
+            self.assertEqual(first_secret, first_invocation.relay_secret)
+
+            supervisor.invocation = None
+            supervisor.status["phase"] = "offline"
+            supervisor._start_invocation("relay")
+            second_invocation = supervisor.invocation
+            self.assertIsNotNone(second_invocation)
+            if second_invocation is None:  # pragma: no cover - assertion narrows the type
+                self.fail("second relay invocation was not created")
+            second_invocation.relay_ready = True
+            next_copy = supervisor.dispatch({"command": "invite"})
+            next_secret = omaphone.parse_invite(next_copy["invite"]).secret
+
+        self.assertNotEqual(next_secret, first_secret)
+        self.assertEqual(next_secret, second_invocation.relay_secret)
+        self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
+
+        supervisor.invocation = None
+        supervisor.status["phase"] = "offline"
+        direct_copy = supervisor.dispatch({"command": "invite"})
+        self.assertEqual(omaphone.parse_invite(direct_copy["invite"]).secret, VALID_SECRET)
+        self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
+
+    def test_relay_invite_fails_closed_during_listener_transition(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("listen")
+        supervisor.status = {**omaphone.status_defaults(), "phase": "relay"}
+        supervisor.stop_reason = "transition"
+        supervisor._persist = mock.Mock()
+
+        response = supervisor.dispatch({"command": "invite"})
+
+        self.assertFalse(response["ok"])
+        self.assertNotIn("invite", response)
+        self.assertIn("not ready", response["error"])
+        self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
+
+    def test_relay_secret_is_repr_hidden_and_never_persisted_in_status(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        relay_secret = omaphone._random_secret()
+        invocation = self.invocation("relay")
+        invocation.relay_secret = relay_secret
+        invocation.relay_ready = True
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = invocation
+        supervisor.status = {**omaphone.status_defaults(), "phase": "relay"}
+        supervisor.stop_reason = ""
+        supervisor._refresh_static = mock.Mock()
+
+        response = supervisor.dispatch({"command": "invite"})
+
+        self.assertTrue(response["ok"])
+        self.assertNotIn(relay_secret, repr(invocation))
+        self.assertNotIn(relay_secret, json.dumps(response["status"], sort_keys=True))
+        for path in self.root.rglob("*"):
+            if path.is_file():
+                with self.subTest(path=path):
+                    self.assertNotIn(relay_secret.encode("ascii"), path.read_bytes())
 
     def test_persist_normalizes_room_state_to_its_active_context(self) -> None:
         omaphone.ensure_layout(self.paths)

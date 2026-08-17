@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA_VERSION = 1
-BACKEND_VERSION = "1.1.0"
+BACKEND_VERSION = "1.1.1"
 UPSTREAM_COMMIT = "67c8167dae167276b1ba69ac66b79b3abedceef8"
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/edengilbertus/terminalphone/"
@@ -366,12 +366,16 @@ def read_secret(paths: Paths) -> str:
     return value if valid_secret(value) else ""
 
 
+def _random_secret() -> str:
+    return base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+
+
 def ensure_room_secret(paths: Paths) -> str:
     existing = read_secret(paths)
     if existing:
         os.chmod(paths.secret_file, 0o600)
         return existing
-    secret = base64.urlsafe_b64encode(os.urandom(32)).decode("ascii").rstrip("=")
+    secret = _random_secret()
     atomic_write(paths.secret_file, secret.encode("ascii"))
     return secret
 
@@ -535,6 +539,7 @@ def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]
         "remoteTalking": False,
         "groupCall": False,
         "roomSize": 0,
+        "relayReady": False,
         "messages": [],
         "settings": dict(DEFAULT_SETTINGS if settings is None else settings),
         "lastError": "",
@@ -861,6 +866,8 @@ class Invocation:
     address: str = ""
     address_sent: bool = False
     relay_confirmed: bool = False
+    relay_ready: bool = False
+    relay_secret: str = dataclasses.field(default="", repr=False)
     rotate_stage: int = 0
     connected_once: bool = False
     write_buffer: bytearray = dataclasses.field(default_factory=bytearray, repr=False)
@@ -917,10 +924,18 @@ class Supervisor:
         self.status["localTalking"] = bool(self.status.get("localTalking") and self.invocation)
         self.status["remoteTalking"] = bool(self.status.get("remoteTalking") and self.invocation)
         self.status["groupCall"] = bool(self.status.get("groupCall") and self.invocation)
+        invocation = self.invocation
+        self.status["relayReady"] = bool(
+            invocation
+            and invocation.kind == "relay"
+            and self.status["phase"] == "relay"
+            and invocation.relay_ready
+            and not getattr(self, "stop_reason", "")
+        )
         room_size = self.status.get("roomSize", 0)
         room_context = bool(
-            self.invocation
-            and (self.status["groupCall"] or self.invocation.kind == "relay")
+            invocation
+            and (self.status["groupCall"] or invocation.kind == "relay")
         )
         self.status["roomSize"] = (
             room_size
@@ -1024,6 +1039,11 @@ class Supervisor:
         self.status["groupCall"] = False
         self.status["roomSize"] = 0
 
+    def _clear_relay_ready(self) -> None:
+        self.status["relayReady"] = False
+        if self.invocation is not None:
+            self.invocation.relay_ready = False
+
     def _start_invocation(self, kind: str, address: str = "") -> None:
         if self.invocation is not None:
             raise OmaphoneError("TerminalPhone is already running")
@@ -1054,7 +1074,15 @@ class Supervisor:
             except Exception:
                 os._exit(127)
         os.set_blocking(master_fd, False)
-        invocation = Invocation(kind, pid, master_fd, OutputStreamParser(), time.monotonic(), address=address)
+        invocation = Invocation(
+            kind,
+            pid,
+            master_fd,
+            OutputStreamParser(),
+            time.monotonic(),
+            address=address,
+            relay_secret=_random_secret() if kind == "relay" else "",
+        )
         self.invocation = invocation
         self.selector.register(master_fd, selectors.EVENT_READ, "pty")
         self.stop_reason = ""
@@ -1062,6 +1090,7 @@ class Supervisor:
         self.pending_text = None
         self._clear_ptt()
         self._clear_room()
+        self._clear_relay_ready()
         self.status["lastError"] = ""
         self.status["phase"] = {
             "listen": "starting",
@@ -1079,12 +1108,14 @@ class Supervisor:
         self.stop_reason = reason
         self._clear_ptt()
         self._clear_room()
+        self._clear_relay_ready()
         if self.invocation is not None:
             # Q works in raw call mode and, with newline, in cooked listen/relay prompts.
             self._write_pty(b"Q\n")
             self.stop_deadline = time.monotonic() + 5.0
 
     def _transition(self, kind: str, address: str = "") -> None:
+        self._clear_relay_ready()
         if self.invocation is None:
             self._start_invocation(kind, address)
         else:
@@ -1162,30 +1193,38 @@ class Supervisor:
             self.status["onion"] = event.value
         elif event.kind == "listening":
             self._clear_room()
+            self._clear_relay_ready()
             self.status["phase"] = "listening"
             invocation.connected_once = False
             self.listener_failures = 0
             self.listener_retry_at = 0.0
         elif event.kind == "connected":
             self._clear_room()
+            self._clear_relay_ready()
             self.status["phase"] = "connected"
             invocation.connected_once = True
             if event.value:
                 self.status["remoteAddress"] = event.value
         elif event.kind == "connected_group":
+            self._clear_relay_ready()
             self.status["groupCall"] = True
             self.status["roomSize"] = 0
             self.status["phase"] = "connected"
             invocation.connected_once = True
         elif event.kind == "testing":
             self._clear_room()
+            self._clear_relay_ready()
             self.status["phase"] = "testing"
         elif event.kind == "relay":
             self._clear_room()
             self.status["phase"] = "relay"
+            if invocation.kind == "relay" and not getattr(self, "stop_reason", ""):
+                invocation.relay_ready = True
+                self.status["relayReady"] = True
         elif event.kind == "call_ended":
             self._clear_ptt()
             self._clear_room()
+            self._clear_relay_ready()
             self.status["phase"] = "starting" if desired_online(self.paths) else "offline"
         elif event.kind == "remote_talking":
             self.status["remoteTalking"] = event.value == "true"
@@ -1236,6 +1275,7 @@ class Supervisor:
         deliberate = bool(self.stop_reason)
         exit_code = os.waitstatus_to_exitcode(wait_status)
         invocation.write_buffer.clear()
+        self._clear_relay_ready()
         self.invocation = None
         self.pending_text = None
         self._clear_ptt()
@@ -1273,6 +1313,7 @@ class Supervisor:
         self._persist()
 
     def _schedule_listener_retry(self, message: str) -> None:
+        self._clear_relay_ready()
         self.listener_failures = max(0, getattr(self, "listener_failures", 0)) + 1
         exponent = min(self.listener_failures - 1, 10)
         delay = min(LISTENER_RETRY_BASE_SECONDS * (2**exponent), LISTENER_RETRY_MAX_SECONDS)
@@ -1297,6 +1338,7 @@ class Supervisor:
 
     def _shutdown_invocation(self) -> None:
         """Synchronously reap TerminalPhone before releasing the daemon lock."""
+        self._clear_relay_ready()
         invocation = self.invocation
         if invocation is None:
             return
@@ -1404,6 +1446,7 @@ class Supervisor:
                 # Used by a newer helper before replacing this daemon. The
                 # lifecycle lock remains held until the child is fully reaped.
                 self.running = False
+                self._clear_relay_ready()
                 return self._response()
             if command == "refresh":
                 self._refresh_static()
@@ -1438,6 +1481,7 @@ class Supervisor:
                 self.listener_failures = 0
                 self.listener_retry_at = 0.0
                 self.pending_invocation = None
+                self._clear_relay_ready()
                 if self.invocation:
                     self._request_stop("offline")
                 else:
@@ -1578,7 +1622,19 @@ class Supervisor:
                 self.status["messages"] = []
                 return self._response()
             if command == "invite":
-                secret = read_secret(self.paths)
+                if self.status.get("phase") == "relay":
+                    invocation = self.invocation
+                    if (
+                        invocation is None
+                        or invocation.kind != "relay"
+                        or not invocation.relay_ready
+                        or getattr(self, "stop_reason", "")
+                        or not valid_secret(invocation.relay_secret)
+                    ):
+                        raise OmaphoneError("group host is not ready to share an invite")
+                    secret = invocation.relay_secret
+                else:
+                    secret = read_secret(self.paths)
                 if not secret:
                     raise OmaphoneError("run setup before creating an invite")
                 config = load_app_config(self.paths)

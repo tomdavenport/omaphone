@@ -36,9 +36,10 @@ UI change cannot silently change the parser contract.
 The supervisor socket and lifecycle lock use `XDG_RUNTIME_DIR`, falling back to
 the user's `/run/user/<uid>` directory and finally a UID-namespaced temporary
 directory. Durable backend, onion identity, and room configuration use XDG
-data. Derived status and bounded message history use XDG state. Every Omaphone
+data. A hosted room's separate secret lives only in the supervisor invocation.
+Derived status and bounded message history use XDG state. Every Omaphone
 directory is checked for user ownership and set to mode `0700`; the socket,
-room secret, lock, and other private files use mode `0600`.
+current call secret, lock, and other private files use mode `0600`.
 
 The UI never invokes TerminalPhone's `status` command. It reads only the
 supervisor's atomic JSON snapshot.

@@ -24,9 +24,12 @@ operational assumptions of TerminalPhone or Tor.
   traffic. Send it through an authenticated, confidential channel.
 - Clipboard managers may retain an invite after copying it. Remove sensitive
   entries when necessary.
-- The room secret is stored unencrypted on disk with mode `0600` so background
-  listening can restart without a passphrase. Full-disk encryption protects a
-  powered-off machine; a compromised or unlocked user account does not.
+- The current call secret is stored unencrypted on disk with mode `0600` so
+  background listening can restart without a passphrase. A hosted room uses a
+  separate secret held in the host backend's memory for that relay session;
+  participants store it when they use the invite. Full-disk encryption
+  protects a powered-off machine; a compromised or unlocked user account does
+  not.
 - The recent in-widget text history is stored as bounded local plaintext state
   and appears in the user-only status snapshot used by the panel and CLI.
   Another process running as the same user can read it. Use **Advanced → Clear
@@ -54,26 +57,27 @@ operational assumptions of TerminalPhone or Tor.
 
 ## Group-room hosting
 
-The experimental group room is an upstream TerminalPhone relay. The host does
-not use the participants' shared room secret and does not decrypt their voice
-or text. It forwards matching protocol frames between callers. Every
-participant uses the same invite and therefore the same room secret; any
-participant with that secret can decrypt room content and may be able to
-impersonate another participant. There is no separate member identity,
-moderator, ban list, or admission service.
+The experimental group room is an upstream TerminalPhone relay. Omaphone
+creates a fresh secret in the host backend's memory for each relay session and
+puts it in the room invite; it does not replace the host's regular call secret.
+The TerminalPhone relay process forwards matching protocol frames and does not
+decrypt voice or text. Every participant uses the same invite and therefore
+the same room secret; any participant with that secret can decrypt room
+content and may be able to impersonate another participant. There is no
+separate member identity, moderator, ban list, or admission service.
 
 Hosting does not need a public IP, router port forwarding, or a separate
 internet server because Tor publishes the relay's onion service. The host
 machine must remain awake and connected, and that Omaphone instance cannot
 speak or chat while it is acting as the relay.
 
-The relay operator still controls the forwarding point. They can observe
-connection count, timing, traffic volume, protocol message types, and
-unencrypted handshake/control fields. They can drop, delay, reorder, replay,
-or split traffic even though they cannot create valid authenticated room
-content without the secret. Relay greetings and group-count notices are not
-authenticated, so presence and room-size displays are informational rather
-than proof of who is present.
+The relay operator still controls the forwarding point and the Omaphone host
+process that creates the room invite. Treat that operator as a trusted room
+participant. They can observe connection count, timing, traffic volume,
+protocol message types, and unencrypted handshake/control fields, and can
+drop, delay, reorder, replay, or split traffic. Relay greetings and group-count
+notices are not authenticated, so presence and room-size displays are
+informational rather than proof of who is present.
 
 The pinned upstream starts `socat` with `TCP-LISTEN` and no explicit bind
 address. On a typical host this listens on non-loopback interfaces as well as

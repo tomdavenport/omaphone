@@ -57,6 +57,19 @@ missing, choose **Install missing tools**, then go online. Tor may take a minute
 or two to connect for the first time. Your private address appears when it is
 ready.
 
+Update an installed copy with:
+
+```bash
+omarchy-shell omaphone.phone offline
+omarchy plugin update omaphone.phone
+```
+
+Omarchy validates the update and reloads the plugin automatically. Very early
+local-checkout installs made before the public repository may not share its
+Git history. If Omarchy refuses that one update even though the checkout is
+clean, remove it with the command below and run the published install command
+again; Omaphone's private state is kept.
+
 To remove Omaphone cleanly:
 
 ```bash
@@ -80,7 +93,7 @@ identity.
 5. Choose **Hang up** when you are finished. If you are online, Omaphone goes
    back to listening.
 
-An invite is a key to the conversation. Anyone who gets it can call the room
+An invite is a key to the conversation. Anyone who gets it can call you
 and decrypt compatible traffic, so treat it like a password: do not post it in
 public, and remove it from clipboard history when that matters. You can delete
 the small local text history from **Advanced**.
@@ -93,21 +106,37 @@ pretends to provide.
 ## Host a group room (experimental)
 
 TerminalPhone includes an experimental multi-caller relay, and Omaphone makes
-it available as **Host a group**. The host can be an ordinary local machine. You
-do not need a public server, a public IP address, or router port forwarding:
-Tor publishes the room as an onion service.
+it available as **Host a group on this computer**. The host can be an ordinary
+local machine. You do not need a public server, a public IP address, or router
+port forwarding: Tor publishes the room as an onion service.
 
 The trade-off is that the host machine must stay awake, online, and running the
 room. That Omaphone instance becomes a relay only; it cannot talk or chat in
 the room. Join from another machine if the host also wants to take part.
 
-To try it:
+Each time you host, Omaphone makes a fresh room key in memory. It does not
+replace or share the host's regular call key, and Omaphone does not save it to
+disk. Participants save the room key as their current call key when they use
+the invite, so they should still treat it like a password. A clipboard manager
+may retain a copied room invite after the room stops.
 
-1. On the host, open **Advanced** and choose **Host a group**.
-2. Give every participant the same invite through a trusted private channel.
-   They must all use its shared room key and settings.
-3. Each participant pairs the invite and calls the host.
-4. Take turns speaking. This is push-to-talk forwarding, not a live audio mix.
+To join a room:
+
+1. Choose **Use an invite** and paste the invite from the host.
+2. Choose **Go online**.
+3. Choose **Call**. There is no separate join mode: the relay identifies the
+   connection as a group call.
+
+To host a room:
+
+1. Under **Small group · Experimental**, choose **Host a group on this
+   computer** and confirm.
+2. Wait for **Room is ready**, then choose **Copy room invite**.
+3. Send that same invite to every participant through a trusted private
+   channel.
+4. Keep the host awake. Everyone else follows the three joining steps above.
+
+Take turns speaking. This is push-to-talk forwarding, not a live audio mix.
 
 Keep rooms small and have one person speak at a time. The upstream design can
 accept multiple callers, but Omaphone labels the feature experimental because
@@ -142,10 +171,12 @@ omarchy pkg aur add snowflake-pt-client
 ## Privacy, in plain English
 
 Omaphone hides networking and cryptography controls; it does not make their
-trade-offs disappear. The room key is kept in a user-only file so Omaphone can
-listen in the background without asking for a passphrase after every restart.
-Recent text messages are also local plaintext with user-only permissions. Disk
-encryption and a locked session still matter.
+trade-offs disappear. Your current call key is kept in a user-only file so
+Omaphone can listen in the background without asking for a passphrase after
+every restart. A hosted room uses a separate, short-lived key in the host
+process; participants save it when they use the room invite. Recent text
+messages are also local plaintext with user-only permissions. Disk encryption
+and a locked session still matter.
 
 TerminalPhone has not been independently audited as part of this project.
 Omaphone preserves its implementation instead of inventing a second
@@ -154,6 +185,10 @@ for a high-risk conversation.
 
 Omaphone does not ship an address book yet. The privacy-safe design we plan to
 use is documented in [Contacts roadmap](docs/CONTACTS.md).
+
+The larger product direction—People, Private Drops, video Postcards, a
+self-hosted answering machine, and the honest boundary around live video—is in
+the [communications roadmap](docs/ROADMAP.md).
 
 ## Command-line controls
 

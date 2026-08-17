@@ -26,6 +26,7 @@ Panel {
         "remoteAddress": "",
         "groupCall": false,
         "roomSize": 0,
+        "relayReady": false,
         "localTalking": false,
         "remoteTalking": false,
         "messages": [],
@@ -40,9 +41,12 @@ Panel {
     readonly property string notice: phoneService ? phoneService.notice : ""
     property bool advancedOpen: false
     property bool pairOpen: false
+    property bool roomConfirmOpen: false
     property bool rotateConfirm: false
     property bool cursorActive: false
     property int actionIndex: 0
+    property string actionCursorId: ""
+    property string lastSyncedRemoteAddress: ""
     // Pointer and keyboard holds feed one desired-state process. If the user
     // releases while `ptt start` is still in flight, `ptt stop` is queued and
     // issued as soon as start exits.
@@ -59,6 +63,7 @@ Panel {
     readonly property bool relaying: phase === "relay"
     readonly property bool groupCall: phoneStatus.groupCall === true
     readonly property int roomSize: typeof phoneStatus.roomSize === "number" && isFinite(phoneStatus.roomSize) ? Math.max(0, Math.min(10000, Math.floor(phoneStatus.roomSize))) : 0
+    readonly property bool relayReady: phoneStatus.relayReady === true
     readonly property bool inSession: connected || calling || relaying
     readonly property bool ready: configured && backendInstalled && dependenciesReady
     readonly property bool pttHeld: pttPointerHeld || pttKeyboardHeld || pttAccessibleHeld
@@ -80,23 +85,8 @@ Panel {
 
             return actions;
         }
-        if (root.connected) {
-            actions.push("ptt", "send", "hangup");
-        } else if (root.calling || root.relaying) {
-            actions.push("hangup");
-        } else {
-            actions.push("online");
-            if (root.online)
-                actions.push("call");
-
-            actions.push("pair");
-        }
-        if (String(root.phoneStatus.onion || "") !== "")
-            actions.push("copy");
-
-        actions.push("advanced");
         if (root.advancedOpen && !root.inSession) {
-            actions.push("quality", "chime", "voice", "snowflake", "hmac", "audio", "relay");
+            actions.push("advanced", "quality", "chime", "voice", "snowflake", "hmac", "audio");
             if (root.visibleMessages.length > 0)
                 actions.push("clear-chat");
 
@@ -106,9 +96,36 @@ Panel {
                 else
                     actions.push("rotate");
             }
-        } else if (root.advancedOpen && root.visibleMessages.length > 0) {
-            actions.push("clear-chat");
+            return actions;
         }
+        if (root.connected) {
+            actions.push("ptt", "send", "hangup");
+        } else if (root.calling) {
+            actions.push("hangup");
+        } else if (root.relaying) {
+            if (root.relayReady && String(root.phoneStatus.onion || "") !== "")
+                actions.push("copy");
+
+            actions.push("hangup");
+        } else {
+            actions.push("online");
+            if (root.phase !== "starting") {
+                if (root.online)
+                    actions.push("call");
+
+                actions.push("pair");
+                if (root.roomConfirmOpen)
+                    actions.push("room-cancel", "room-start");
+                else
+                    actions.push("room");
+            }
+        }
+        if (!root.relaying && String(root.phoneStatus.onion || "") !== "")
+            actions.push("copy");
+
+        if (!root.inSession)
+            actions.push("advanced");
+
         return actions;
     }
     readonly property string heroTitle: {
@@ -134,7 +151,7 @@ Panel {
             return "Testing audio";
 
         if (phase === "relay")
-            return "Hosting a group";
+            return relayReady ? "Hosting a group" : "Starting group host";
 
         if (phase === "error")
             return "Needs attention";
@@ -175,9 +192,12 @@ Panel {
         if (phase === "testing")
             return "Check your speakers and microphone";
 
-        if (phase === "relay")
-            return roomSize > 0 ? connectedLabel(roomSize) : "Passing messages between the group";
+        if (phase === "relay") {
+            if (!relayReady)
+                return "Connecting the room over Tor";
 
+            return roomSize > 0 ? connectedLabel(roomSize) : "Ready for people to join";
+        }
         if (phase === "error")
             return "Open the error below for details";
 
@@ -200,7 +220,7 @@ Panel {
             return "WORKING";
 
         if (phase === "relay")
-            return "HOSTING";
+            return relayReady ? "HOSTING" : "WORKING";
 
         if (phase === "error")
             return "ERROR";
@@ -228,9 +248,12 @@ Panel {
         if (calling)
             return groupCall ? "Omaphone · joining a group" : "Omaphone · calling";
 
-        if (relaying)
-            return roomSize > 0 ? "Omaphone · hosting · " + connectedLabel(roomSize) : "Omaphone · hosting a group";
+        if (relaying) {
+            if (!relayReady)
+                return "Omaphone · starting group host";
 
+            return roomSize > 0 ? "Omaphone · hosting · " + connectedLabel(roomSize) : "Omaphone · hosting a group";
+        }
         if (online)
             return "Omaphone · online";
 
@@ -278,9 +301,14 @@ Panel {
 
     function syncDialAddress() {
         var address = String(phoneStatus.remoteAddress || "").trim();
-        if (!dialField.activeFocus && String(dialField.text || "").trim() === "" && /^[a-z2-7]{56}\.onion$/i.test(address))
+        var currentAddress = String(dialField.text || "").trim();
+        var addressIsValid = /^[a-z2-7]{56}\.onion$/i.test(address);
+        if (!dialField.activeFocus && addressIsValid && (currentAddress === "" || currentAddress === lastSyncedRemoteAddress)) {
             dialField.text = address;
-
+            lastSyncedRemoteAddress = address;
+        } else if (currentAddress === address && addressIsValid) {
+            lastSyncedRemoteAddress = address;
+        }
     }
 
     function refresh() {
@@ -384,9 +412,56 @@ Panel {
     }
 
     function startRelay() {
+        roomConfirmOpen = false;
         if (phoneService)
             phoneService.startRelay();
 
+    }
+
+    function togglePair() {
+        roomConfirmOpen = false;
+        pairOpen = !pairOpen;
+        if (pairOpen) {
+            Qt.callLater(function() {
+                pairField.forceActiveFocus();
+                root.revealAction("pair");
+            });
+        } else {
+            pairField.text = "";
+            keyCatcher.forceActiveFocus();
+        }
+    }
+
+    function openRoomConfirm() {
+        pairField.text = "";
+        pairOpen = false;
+        roomConfirmOpen = true;
+        advancedOpen = false;
+        rotateConfirm = false;
+        Qt.callLater(function() {
+            root.revealAction("room-start");
+        });
+    }
+
+    function cancelRoomConfirm() {
+        roomConfirmOpen = false;
+        Qt.callLater(function() {
+            root.revealAction("room");
+        });
+    }
+
+    function toggleAdvanced() {
+        advancedOpen = !advancedOpen;
+        var showingAdvanced = advancedOpen;
+        roomConfirmOpen = false;
+        rotateConfirm = false;
+        Qt.callLater(function() {
+            root.selectAction("advanced");
+            panelFlick.contentY = 0;
+            if (!showingAdvanced)
+                root.revealAction("advanced");
+
+        });
     }
 
     function rotateIdentity() {
@@ -482,9 +557,18 @@ Panel {
     function clampActionIndex() {
         if (mainActions.length === 0) {
             actionIndex = 0;
+            actionCursorId = "";
             return ;
         }
+        if (cursorActive && actionCursorId !== "") {
+            var preservedIndex = mainActions.indexOf(actionCursorId);
+            if (preservedIndex >= 0) {
+                actionIndex = preservedIndex;
+                return ;
+            }
+        }
         actionIndex = Math.max(0, Math.min(actionIndex, mainActions.length - 1));
+        actionCursorId = String(mainActions[actionIndex] || "");
     }
 
     function selectAction(action) {
@@ -494,6 +578,7 @@ Panel {
 
         cursorActive = true;
         actionIndex = index;
+        actionCursorId = action;
     }
 
     function actionHasCursor(action) {
@@ -507,6 +592,7 @@ Panel {
         cursorActive = true;
         actionIndex = Math.max(0, Math.min(mainActions.length - 1, actionIndex + delta));
         var action = mainActions[actionIndex];
+        actionCursorId = action;
         if (action === "call" && dialField.activeFocus)
             keyCatcher.forceActiveFocus();
 
@@ -529,7 +615,16 @@ Panel {
             return callButton;
 
         if (action === "pair")
-            return pairToggleButton;
+            return root.pairOpen ? pairButton : pairToggleButton;
+
+        if (action === "room")
+            return roomHostButton;
+
+        if (action === "room-cancel")
+            return roomCancelButton;
+
+        if (action === "room-start")
+            return roomStartButton;
 
         if (action === "ptt")
             return talkSurface;
@@ -550,7 +645,7 @@ Panel {
             return null;
         }
         if (action === "copy")
-            return copyButton;
+            return root.relaying ? hostingCopyButton : copyButton;
 
         if (action === "advanced")
             return advancedButton;
@@ -573,9 +668,6 @@ Panel {
         if (action === "audio")
             return audioButton;
 
-        if (action === "relay")
-            return relayButton;
-
         if (action === "rotate")
             return rotateButton;
 
@@ -596,13 +688,14 @@ Panel {
         if (!item || !item.visible)
             return ;
 
-        var point = item.mapToItem(contentColumn, 0, 0);
+        var point = item.mapToItem(panelFlick.contentItem, 0, 0);
         var top = Math.max(0, point.y - Style.space(8));
         var bottom = point.y + item.height + Style.space(8);
+        var maxY = Math.max(0, panelFlick.contentHeight - panelFlick.height);
         if (top < panelFlick.contentY)
-            panelFlick.contentY = top;
+            panelFlick.contentY = Math.max(0, Math.min(maxY, top));
         else if (bottom > panelFlick.contentY + panelFlick.height)
-            panelFlick.contentY = Math.max(0, Math.min(panelFlick.contentHeight - panelFlick.height, bottom - panelFlick.height));
+            panelFlick.contentY = Math.max(0, Math.min(maxY, bottom - panelFlick.height));
     }
 
     function activateAction() {
@@ -623,9 +716,11 @@ Panel {
                 callAddress();
         } else if (action === "pair") {
             if (!pairOpen) {
+                roomConfirmOpen = false;
                 pairOpen = true;
                 Qt.callLater(function() {
                     pairField.forceActiveFocus();
+                    root.revealAction("pair");
                 });
             } else {
                 pairInvite();
@@ -641,8 +736,14 @@ Panel {
             hangup();
         else if (action === "copy")
             copyInvite();
+        else if (action === "room")
+            openRoomConfirm();
+        else if (action === "room-cancel")
+            cancelRoomConfirm();
+        else if (action === "room-start")
+            startRelay();
         else if (action === "advanced")
-            advancedOpen = !advancedOpen;
+            toggleAdvanced();
         else if (action === "quality")
             qualityDropdown.open();
         else if (action === "chime")
@@ -655,8 +756,6 @@ Panel {
             toggleConfig("hmac", hmacToggle.checked);
         else if (action === "audio")
             runAudioTest();
-        else if (action === "relay")
-            startRelay();
         else if (action === "rotate")
             rotateConfirm = true;
         else if (action === "rotate-cancel")
@@ -681,6 +780,7 @@ Panel {
         releasePtt();
         pairField.text = "";
         pairOpen = false;
+        roomConfirmOpen = false;
         rotateConfirm = false;
         root.controller.hide();
     }
@@ -690,7 +790,15 @@ Panel {
     // The singleton service owns IPC and every backend process. This per-monitor
     // panel owns only presentation and local focus/hold state.
     manageIpc: false
-    onMainActionsChanged: clampActionIndex()
+    onMainActionsChanged: {
+        clampActionIndex();
+        if (cursorActive && actionCursorId !== "") {
+            var actionToReveal = actionCursorId;
+            Qt.callLater(function() {
+                root.revealAction(actionToReveal);
+            });
+        }
+    }
     onPhoneServiceChanged: {
         if (phoneService) {
             refresh();
@@ -711,6 +819,14 @@ Panel {
             releasePtt();
 
     }
+    onInSessionChanged: {
+        if (inSession) {
+            advancedOpen = false;
+            roomConfirmOpen = false;
+            rotateConfirm = false;
+            panelFlick.contentY = 0;
+        }
+    }
     onVisibleChanged: {
         if (!visible)
             releasePtt();
@@ -720,11 +836,14 @@ Panel {
         if (opened) {
             cursorActive = false;
             actionIndex = 0;
+            actionCursorId = mainActions.length > 0 ? String(mainActions[0]) : "";
+            panelFlick.contentY = 0;
             refresh();
         } else {
             releasePtt();
             pairField.text = "";
             pairOpen = false;
+            roomConfirmOpen = false;
             rotateConfirm = false;
         }
     }
@@ -991,7 +1110,7 @@ Panel {
                         Button {
                             id: onlineButton
 
-                            visible: !root.inSession
+                            visible: !root.inSession && !root.advancedOpen
                             width: parent.width
                             text: root.phase === "starting" ? "Going online…" : (root.online ? "Go offline" : "Go online")
                             iconText: root.online ? "󰖪" : "󰖩"
@@ -1013,7 +1132,7 @@ Panel {
                         }
 
                         Column {
-                            visible: !root.inSession && root.phase !== "starting"
+                            visible: !root.inSession && root.phase !== "starting" && !root.advancedOpen
                             width: parent.width
                             spacing: Style.space(7)
 
@@ -1082,29 +1201,11 @@ Panel {
                                         root.selectAction("pair");
 
                                 }
-                                onClicked: {
-                                    root.pairOpen = !root.pairOpen;
-                                    if (root.pairOpen) {
-                                        Qt.callLater(function() {
-                                            pairField.forceActiveFocus();
-                                        });
-                                    } else {
-                                        pairField.text = "";
-                                        keyCatcher.forceActiveFocus();
-                                    }
-                                }
+                                onClicked: root.togglePair()
                                 Accessible.role: Accessible.Button
                                 Accessible.name: text
                                 Accessible.description: "Paste a private Omaphone invite code; this replaces your current call key"
-                                Accessible.onPressAction: {
-                                    root.pairOpen = !root.pairOpen;
-                                    if (root.pairOpen)
-                                        Qt.callLater(function() {
-                                        pairField.forceActiveFocus();
-                                    });
-                                    else
-                                        pairField.text = "";
-                                }
+                                Accessible.onPressAction: root.togglePair()
                             }
 
                             Row {
@@ -1172,6 +1273,159 @@ Panel {
                         }
 
                         Column {
+                            id: roomColumn
+
+                            visible: !root.inSession && root.phase !== "starting" && !root.advancedOpen
+                            width: parent.width
+                            spacing: Style.space(7)
+
+                            PanelSeparator {
+                                foreground: root.foreground
+                            }
+
+                            PanelSectionHeader {
+                                text: "SMALL GROUP · EXPERIMENTAL"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "Joining? Choose Use an invite, paste the host's invite, go online, then choose Call. Hosting uses this computer as the relay; no public server or port forwarding."
+                                color: Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Button {
+                                id: roomHostButton
+
+                                visible: !root.roomConfirmOpen
+                                width: parent.width
+                                text: "Host a group on this computer"
+                                iconText: "󰑃"
+                                leftAlign: true
+                                bordered: true
+                                enabled: !root.commandBusy
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("room")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("room");
+
+                                }
+                                onClicked: root.openRoomConfirm()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Host a small group on this computer"
+                                Accessible.description: "Experimental; this computer stays online as a relay and cannot join the conversation"
+                                Accessible.onPressAction: root.openRoomConfirm()
+                            }
+
+                            CursorSurface {
+                                visible: root.roomConfirmOpen
+                                width: parent.width
+                                implicitHeight: roomConfirmColumn.implicitHeight + Style.space(18)
+                                current: true
+                                foreground: root.accent
+                                accent: root.accent
+
+                                Column {
+                                    id: roomConfirmColumn
+
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: Style.space(9)
+                                    anchors.rightMargin: Style.space(9)
+                                    spacing: Style.space(6)
+
+                                    Text {
+                                        width: parent.width
+                                        text: "Host from this computer?"
+                                        color: root.foreground
+                                        font.family: root.fontFamily
+                                        font.pixelSize: Style.font.body
+                                        font.bold: true
+                                    }
+
+                                    Text {
+                                        width: parent.width
+                                        text: "Keep it awake. This Omaphone only passes messages, so join from a second device if you want to talk too."
+                                        color: root.foreground
+                                        font.family: root.fontFamily
+                                        font.pixelSize: Style.font.bodySmall
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Text {
+                                        width: parent.width
+                                        text: "After it starts, Omaphone makes a fresh key for this room. Copy the room invite and send the same invite privately to everyone."
+                                        color: Qt.darker(root.foreground, 1.35)
+                                        font.family: root.fontFamily
+                                        font.pixelSize: Style.font.caption
+                                        wrapMode: Text.WordWrap
+                                    }
+
+                                    Row {
+                                        width: parent.width
+                                        spacing: Style.space(7)
+
+                                        Button {
+                                            id: roomCancelButton
+
+                                            width: (parent.width - parent.spacing) / 2
+                                            text: "Cancel"
+                                            bordered: true
+                                            foreground: root.foreground
+                                            accent: root.accent
+                                            fontFamily: root.fontFamily
+                                            hasCursor: root.actionHasCursor("room-cancel")
+                                            onHovered: function(hovered) {
+                                                if (hovered)
+                                                    root.selectAction("room-cancel");
+
+                                            }
+                                            onClicked: root.cancelRoomConfirm()
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: "Cancel group hosting"
+                                            Accessible.onPressAction: root.cancelRoomConfirm()
+                                        }
+
+                                        Button {
+                                            id: roomStartButton
+
+                                            width: (parent.width - parent.spacing) / 2
+                                            text: "Start hosting"
+                                            bordered: true
+                                            enabled: !root.commandBusy
+                                            foreground: root.foreground
+                                            accent: root.accent
+                                            fontFamily: root.fontFamily
+                                            hasCursor: root.actionHasCursor("room-start")
+                                            onHovered: function(hovered) {
+                                                if (hovered)
+                                                    root.selectAction("room-start");
+
+                                            }
+                                            onClicked: root.startRelay()
+                                            Accessible.role: Accessible.Button
+                                            Accessible.name: "Start hosting the group"
+                                            Accessible.description: "This computer becomes the relay and cannot join the conversation"
+                                            Accessible.onPressAction: root.startRelay()
+                                        }
+
+                                    }
+
+                                }
+
+                            }
+
+                        }
+
+                        Column {
                             visible: root.calling
                             width: parent.width
                             spacing: Style.space(8)
@@ -1219,7 +1473,7 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: root.roomSize > 0 ? root.connectedLabel(root.roomSize) : "Group host is running"
+                                text: !root.relayReady ? "Starting the room host…" : (root.roomSize > 0 ? root.connectedLabel(root.roomSize) : "Room is ready")
                                 color: root.foreground
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.subtitle
@@ -1229,10 +1483,45 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: "This Omaphone only passes messages between the group. You cannot talk or chat while it is hosting."
+                                text: root.relayReady ? "This computer is the relay only. Keep it awake, and join from a second device if you want to talk too." : "Tor is opening the room. This can take a minute."
                                 color: Qt.darker(root.foreground, 1.35)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Button {
+                                id: hostingCopyButton
+
+                                width: parent.width
+                                text: !root.relayReady || String(root.phoneStatus.onion || "") === "" ? "Preparing room invite…" : (root.clipboardBusy ? "Copying…" : "Copy room invite")
+                                iconText: "󰆏"
+                                bordered: true
+                                enabled: root.relayReady && String(root.phoneStatus.onion || "") !== "" && !root.actionBusy && !root.clipboardBusy
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("copy")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("copy");
+
+                                }
+                                onClicked: root.copyInvite()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: text
+                                Accessible.description: "Copy the private invite to share with every participant"
+                                Accessible.onPressAction: root.copyInvite()
+                            }
+
+                            Text {
+                                visible: root.relayReady
+                                width: parent.width
+                                text: "On every participant's device: Use an invite → Go online → Call. Share the same invite privately with everyone."
+                                color: Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
                                 horizontalAlignment: Text.AlignHCenter
                                 wrapMode: Text.WordWrap
                             }
@@ -1416,7 +1705,7 @@ Panel {
                         }
 
                         Column {
-                            visible: root.visibleMessages.length > 0
+                            visible: root.visibleMessages.length > 0 && !root.advancedOpen
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -1484,7 +1773,7 @@ Panel {
                         }
 
                         Column {
-                            visible: String(root.phoneStatus.onion || "") !== ""
+                            visible: String(root.phoneStatus.onion || "") !== "" && !root.advancedOpen && !root.relaying
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -1557,9 +1846,10 @@ Panel {
                         Button {
                             id: advancedButton
 
+                            visible: !root.inSession
                             width: parent.width
-                            text: root.advancedOpen ? "Hide advanced" : "Advanced"
-                            iconText: root.advancedOpen ? "󰅃" : "󰅀"
+                            text: root.advancedOpen ? "Back to phone" : "Advanced"
+                            iconText: root.advancedOpen ? "󰁍" : "󰅀"
                             leftAlign: true
                             foreground: root.foreground
                             accent: root.accent
@@ -1570,22 +1860,16 @@ Panel {
                                     root.selectAction("advanced");
 
                             }
-                            onClicked: {
-                                root.advancedOpen = !root.advancedOpen;
-                                root.rotateConfirm = false;
-                            }
+                            onClicked: root.toggleAdvanced()
                             Accessible.role: Accessible.Button
                             Accessible.name: text
-                            Accessible.onPressAction: {
-                                root.advancedOpen = !root.advancedOpen;
-                                root.rotateConfirm = false;
-                            }
+                            Accessible.onPressAction: root.toggleAdvanced()
                         }
 
                         Column {
                             id: advancedColumn
 
-                            visible: root.advancedOpen
+                            visible: root.advancedOpen && !root.inSession
                             width: parent.width
                             spacing: Style.space(10)
 
@@ -1780,76 +2064,28 @@ Panel {
                                 Accessible.onPressAction: root.toggleConfig("hmac", checked)
                             }
 
-                            Row {
+                            Button {
+                                id: audioButton
+
                                 width: parent.width
-                                spacing: Style.space(7)
+                                text: "Audio test"
+                                iconText: "󰋋"
+                                leftAlign: true
+                                bordered: true
+                                enabled: !root.commandBusy && !root.inSession
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("audio")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("audio");
 
-                                Button {
-                                    id: audioButton
-
-                                    width: (parent.width - parent.spacing) / 2
-                                    text: "Audio test"
-                                    iconText: "󰋋"
-                                    bordered: true
-                                    enabled: !root.commandBusy && !root.inSession
-                                    foreground: root.foreground
-                                    accent: root.accent
-                                    fontFamily: root.fontFamily
-                                    hasCursor: root.actionHasCursor("audio")
-                                    onHovered: function(hovered) {
-                                        if (hovered)
-                                            root.selectAction("audio");
-
-                                    }
-                                    onClicked: root.runAudioTest()
-                                    Accessible.role: Accessible.Button
-                                    Accessible.name: "Run audio test"
-                                    Accessible.onPressAction: root.runAudioTest()
                                 }
-
-                                Button {
-                                    id: relayButton
-
-                                    width: (parent.width - parent.spacing) / 2
-                                    text: root.relaying ? "Stop hosting" : "Host a group"
-                                    iconText: "󰑃"
-                                    bordered: true
-                                    enabled: root.relaying ? !root.actionBusy : (!root.commandBusy && !root.inSession)
-                                    foreground: root.foreground
-                                    accent: root.accent
-                                    fontFamily: root.fontFamily
-                                    hasCursor: root.actionHasCursor("relay")
-                                    onHovered: function(hovered) {
-                                        if (hovered)
-                                            root.selectAction("relay");
-
-                                    }
-                                    onClicked: {
-                                        if (root.relaying)
-                                            root.hangup();
-                                        else
-                                            root.startRelay();
-                                    }
-                                    Accessible.role: Accessible.Button
-                                    Accessible.name: text
-                                    Accessible.description: root.relaying ? "Stop passing messages for this group" : "Experimental; pass messages between a group without joining the conversation"
-                                    Accessible.onPressAction: {
-                                        if (root.relaying)
-                                            root.hangup();
-                                        else
-                                            root.startRelay();
-                                    }
-                                }
-
-                            }
-
-                            Text {
-                                width: parent.width
-                                text: root.relaying ? "This Omaphone only passes messages between the group. You cannot talk or chat while it is hosting." : "Experimental: this Omaphone becomes the group's relay. It cannot talk or chat while hosting."
-                                color: Qt.darker(root.foreground, 1.5)
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.font.caption
-                                wrapMode: Text.WordWrap
+                                onClicked: root.runAudioTest()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Run audio test"
+                                Accessible.onPressAction: root.runAudioTest()
                             }
 
                             Button {
@@ -1989,10 +2225,15 @@ Panel {
 
                     }
 
+                    Item {
+                        width: parent.width
+                        height: Style.space(4)
+                    }
+
                 }
 
                 ScrollBar.vertical: ScrollBar {
-                    policy: ScrollBar.AsNeeded
+                    policy: panelFlick.contentHeight > panelFlick.height ? ScrollBar.AlwaysOn : ScrollBar.AlwaysOff
                 }
 
             }
