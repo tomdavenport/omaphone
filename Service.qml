@@ -26,6 +26,7 @@ Item {
         "onion": "",
         "remoteAddress": "",
         "pairedAddress": "",
+        "peerKind": "",
         "hasPeer": false,
         "preferredRole": "",
         "selfPeer": false,
@@ -100,7 +101,7 @@ Item {
         var knownBackendError = /^omaphone\s*:/i.test(rawError);
         var detail = maySurfaceDetail && knownBackendError ? safePlainText(rawError, 180) : "";
         if (["join", "call-peer"].indexOf(String(kind || "")) >= 0)
-            detail = detail.replace(/Omaphone invite/gi, "private contact card").replace(/\binvite\b/gi, "contact card");
+            detail = detail.replace(/Omaphone invite/gi, "private card").replace(/\binvite\b/gi, "card");
 
         if (detail !== "")
             detail = detail.charAt(0).toUpperCase() + detail.substring(1);
@@ -207,6 +208,7 @@ Item {
         };
         var safeRoomSize = typeof parsed.roomSize === "number" && isFinite(parsed.roomSize) ? Math.max(0, Math.min(10000, Math.floor(parsed.roomSize))) : 0;
         var pairedAddress = addressIsSafe(parsed.pairedAddress) ? String(parsed.pairedAddress).toLowerCase() : "";
+        var peerKind = pairedAddress === "" ? "" : (String(parsed.peerKind || "") === "group" ? "group" : "direct");
         var preferredRole = ["caller", "listener"].indexOf(String(parsed.preferredRole || "")) >= 0 ? String(parsed.preferredRole) : "";
         var callStage = ["preparing", "opening-tor", "dialing"].indexOf(String(parsed.callStage || "")) >= 0 ? String(parsed.callStage) : "";
         var torProgress = typeof parsed.torProgress === "number" && isFinite(parsed.torProgress) ? Math.max(0, Math.min(100, Math.floor(parsed.torProgress))) : 0;
@@ -228,6 +230,7 @@ Item {
             "onion": String(parsed.onion || ""),
             "remoteAddress": String(parsed.remoteAddress || ""),
             "pairedAddress": pairedAddress,
+            "peerKind": peerKind,
             "hasPeer": parsed.hasPeer === true && pairedAddress !== "",
             "preferredRole": preferredRole,
             "selfPeer": parsed.selfPeer === true,
@@ -299,10 +302,10 @@ Item {
             return "Calling…";
 
         if (kind === "join")
-            return "Phone added — connecting…";
+            return String(phoneStatus.peerKind || "") === "group" ? "Room saved — connecting…" : "Phone added — connecting…";
 
         if (kind === "clear-peer")
-            return "Paired phone cleared";
+            return "Saved call cleared";
 
         if (kind === "audio-test")
             return "Audio test started";
@@ -330,7 +333,7 @@ Item {
             return "Audio test failed";
 
         if (kind === "copy-invite")
-            return "Could not create an invite";
+            return "Could not create the private card";
 
         if (kind === "config")
             return "Could not save that setting";
@@ -339,13 +342,13 @@ Item {
             return "Message was not sent";
 
         if (kind === "join")
-            return "Could not add that phone";
+            return "Could not use that card";
 
         if (kind === "call-peer")
             return "Could not call the paired phone";
 
         if (kind === "clear-peer")
-            return "Could not clear the paired phone";
+            return "Could not clear the saved call";
 
         if (kind === "call")
             return "Could not place the call";
@@ -451,7 +454,7 @@ Item {
 
         var invite = String(value || "").trim();
         if (invite === "") {
-            actionError = "Paste their private contact card first";
+            actionError = "Paste a private contact card or room invite first";
             return false;
         }
         // The opaque invite (and its embedded room secret) never enters argv.
@@ -589,7 +592,7 @@ Item {
     function copyOpaqueInvite(invite, waitingCard) {
         var value = String(invite || "").trim();
         if (value.indexOf("omaphone:v1:") !== 0 || clipboardProcess.running) {
-            actionError = waitingCard ? "Omaphone did not produce a valid private contact card" : "Omaphone did not produce a valid invite";
+            actionError = waitingCard ? "Omaphone did not produce a valid private contact card" : "Omaphone did not produce a valid private card";
             return ;
         }
         // The fragment is fixed; the opaque invite is written only on stdin.
@@ -913,7 +916,7 @@ Item {
             inviteProcess.waitingCard = false;
             inviteProcess.startPending = false;
             root.notice = "";
-            root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create an invite";
+            root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create a private card";
         }
     }
 
@@ -931,7 +934,7 @@ Item {
             clipboardProcess.waitingCard = false;
             clipboardProcess.startPending = false;
             root.notice = "";
-            root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the invite";
+            root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the private card";
         }
     }
 
@@ -944,7 +947,7 @@ Item {
             var waitingCardCopy = inviteProcess.waitingCard;
             inviteProcess.output = "";
             inviteProcess.waitingCard = false;
-            root.actionError = waitingCardCopy ? "Could not create the private contact card (timed out)" : "Could not create an invite (timed out)";
+            root.actionError = waitingCardCopy ? "Could not create the private contact card (timed out)" : "Could not create a private card (timed out)";
             if (inviteProcess.running)
                 inviteProcess.signal(9);
 
@@ -960,7 +963,7 @@ Item {
             var waitingCardCopy = clipboardProcess.waitingCard;
             clipboardProcess.payload = "";
             clipboardProcess.waitingCard = false;
-            root.actionError = waitingCardCopy ? "Could not copy the private contact card (timed out)" : "Could not copy the invite (timed out)";
+            root.actionError = waitingCardCopy ? "Could not copy the private contact card (timed out)" : "Could not copy the private card (timed out)";
             if (clipboardProcess.running)
                 clipboardProcess.signal(9);
 
@@ -1092,7 +1095,7 @@ Item {
                 root.copyOpaqueInvite(invite, waitingCardCopy);
             } else {
                 root.notice = "";
-                root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create an invite";
+                root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create a private card";
             }
             root.refresh();
         }
@@ -1130,10 +1133,10 @@ Item {
             // invite. Clear it as soon as the stdin-to-wl-copy bridge exits.
             payload = "";
             if (exitCode === 0) {
-                root.notice = waitingCardCopy ? "Contact card copied — send it privately and leave this computer waiting." : "Invite copied";
+                root.notice = waitingCardCopy ? "Contact card copied — send it privately and leave this computer waiting." : "Private card copied";
             } else {
                 root.notice = "";
-                root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the invite";
+                root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the private card";
             }
             waitingCard = false;
         }

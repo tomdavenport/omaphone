@@ -26,6 +26,7 @@ Panel {
         "onion": "",
         "remoteAddress": "",
         "pairedAddress": "",
+        "peerKind": "",
         "hasPeer": false,
         "preferredRole": "",
         "selfPeer": false,
@@ -54,9 +55,12 @@ Panel {
     readonly property int joinSuccessSequence: phoneService ? phoneService.joinSuccessSequence : 0
     property bool advancedOpen: false
     property bool pairOpen: false
+    property string pairMode: "phone"
     property bool roomConfirmOpen: false
     property bool rotateConfirm: false
     property bool cursorActive: false
+    property bool keyboardNavigationActive: false
+    property string helpHoverAction: ""
     property int actionIndex: 0
     property string actionCursorId: ""
     property string lastSyncedRemoteAddress: ""
@@ -80,6 +84,8 @@ Panel {
     readonly property bool relayReady: phoneStatus.relayReady === true
     readonly property bool inSession: connected || calling || relaying
     readonly property bool hasPeer: phoneStatus.hasPeer === true && String(phoneStatus.pairedAddress || "") !== ""
+    readonly property string peerKind: hasPeer && String(phoneStatus.peerKind || "") === "group" ? "group" : (hasPeer ? "direct" : "")
+    readonly property bool groupPeer: peerKind === "group"
     readonly property bool selfPeer: phoneStatus.selfPeer === true
     readonly property string preferredRole: {
         var explicitRole = String(phoneStatus.preferredRole || "");
@@ -123,14 +129,17 @@ Panel {
             return actions;
         }
         if (root.advancedOpen && !root.inSession) {
-            actions.push("advanced", "call");
-            if (root.roomConfirmOpen)
-                actions.push("room-cancel", "room-start");
-            else
-                actions.push("room");
-            if (String(root.phoneStatus.onion || "") !== "")
+            if (root.phase !== "starting") {
+                actions.push("join-room");
+                if (root.roomConfirmOpen)
+                    actions.push("room-cancel", "room-start");
+                else
+                    actions.push("room");
+            }
+            if (String(root.phoneStatus.onion || "") !== "" && !root.groupPeer)
                 actions.push("copy");
 
+            actions.push("advanced", "call");
             actions.push("quality", "chime", "voice");
             if (root.snowflakeAvailable || root.snowflakeEnabled)
                 actions.push("snowflake");
@@ -153,6 +162,10 @@ Panel {
         if (root.snowflakeBlocked && !root.inSession)
             actions.push("normal-tor");
 
+        if (root.pairOpen && !root.inSession) {
+            actions.push("add-phone", "add-cancel");
+            return actions;
+        }
         if (root.connected) {
             actions.push("ptt", "send", "hangup");
         } else if (root.calling) {
@@ -164,6 +177,8 @@ Panel {
             actions.push("hangup");
         } else if (root.selfPeer)
             actions.push("add-phone", "clear-peer");
+        else if (root.groupPeer)
+            actions.push("room-peer-call", "add-phone", "clear-peer");
         else if (root.hasPeer)
             actions.push("paired-primary", "role-switch");
         else
@@ -184,10 +199,10 @@ Panel {
             return "Opening a private line";
 
         if (phase === "listening")
-            return hasPeer ? "Waiting for paired phone" : "Waiting for a call";
+            return groupPeer ? "Room invite saved" : (hasPeer ? "Waiting for paired phone" : "Waiting for a call");
 
         if (phase === "calling")
-            return groupCall ? "Joining group" : "Calling paired phone";
+            return groupCall || groupPeer ? "Joining group" : "Calling paired phone";
 
         if (phase === "connected")
             return groupCall ? "Group call" : "Private call";
@@ -223,7 +238,7 @@ Panel {
             return "Preparing private route";
 
         if (phase === "listening")
-            return "Leave this computer waiting";
+            return groupPeer ? "Rejoin it, or add your phone again" : "Leave this computer waiting";
 
         if (phase === "calling")
             return callProgressText();
@@ -291,7 +306,7 @@ Panel {
             return "Omaphone · private call connected";
         }
         if (calling)
-            return groupCall ? "Omaphone · joining a group" : "Omaphone · calling";
+            return groupCall || groupPeer ? "Omaphone · joining a group" : "Omaphone · calling";
 
         if (relaying) {
             if (!relayReady)
@@ -321,7 +336,7 @@ Panel {
             return "Opening Tor " + String(torProgress) + "%";
 
         if (callStage === "dialing")
-            return "Waiting for other computer";
+            return groupPeer ? "Waiting for room host" : "Waiting for other computer";
 
         return "Preparing private route";
     }
@@ -413,6 +428,10 @@ Panel {
 
     function joinPhone() {
         var invite = String(pairField.text || "").trim();
+        if (invite === "") {
+            pairField.forceActiveFocus();
+            return ;
+        }
         if (!phoneService || !phoneService.join(invite))
             pairField.forceActiveFocus();
 
@@ -522,6 +541,7 @@ Panel {
 
     function togglePair() {
         roomConfirmOpen = false;
+        pairMode = "phone";
         pairOpen = !pairOpen;
         if (pairOpen)
             Qt.callLater(function() {
@@ -533,14 +553,37 @@ Panel {
     }
 
     function cancelAddPhone() {
+        var returnToRooms = pairMode === "room";
         pairField.text = "";
         pairOpen = false;
+        pairMode = "phone";
+        advancedOpen = returnToRooms;
         keyCatcher.forceActiveFocus();
+        if (returnToRooms)
+            Qt.callLater(function() {
+            root.selectAction("join-room");
+            root.revealAction("join-room");
+        });
+
+    }
+
+    function openRoomJoin() {
+        pairField.text = "";
+        advancedOpen = false;
+        roomConfirmOpen = false;
+        rotateConfirm = false;
+        pairMode = "room";
+        pairOpen = true;
+        Qt.callLater(function() {
+            pairField.forceActiveFocus();
+            root.revealAction("add-phone");
+        });
     }
 
     function openRoomConfirm() {
         pairField.text = "";
         pairOpen = false;
+        pairMode = "phone";
         roomConfirmOpen = true;
         rotateConfirm = false;
         Qt.callLater(function() {
@@ -558,6 +601,11 @@ Panel {
     function toggleAdvanced() {
         advancedOpen = !advancedOpen;
         var showingAdvanced = advancedOpen;
+        if (showingAdvanced) {
+            pairField.text = "";
+            pairOpen = false;
+            pairMode = "phone";
+        }
         roomConfirmOpen = false;
         rotateConfirm = false;
         Qt.callLater(function() {
@@ -690,11 +738,27 @@ Panel {
         return cursorActive && mainActions[actionIndex] === action;
     }
 
+    function handleHelpHover(action, hovered) {
+        if (hovered) {
+            keyboardNavigationActive = false;
+            helpHoverAction = action;
+            selectAction(action);
+        } else if (helpHoverAction === action) {
+            helpHoverAction = "";
+        }
+    }
+
+    function helpVisible(action) {
+        return helpHoverAction === action || (keyboardNavigationActive && actionHasCursor(action));
+    }
+
     function moveAction(delta) {
         if (mainActions.length === 0)
             return ;
 
         cursorActive = true;
+        keyboardNavigationActive = true;
+        helpHoverAction = "";
         actionIndex = Math.max(0, Math.min(mainActions.length - 1, actionIndex + delta));
         var action = mainActions[actionIndex];
         actionCursorId = action;
@@ -723,19 +787,28 @@ Panel {
             return sharePhoneButton;
 
         if (action === "add-phone")
-            return root.pairOpen ? pairButton : (root.selfPeer ? selfAddPhoneButton : pairToggleButton);
+            return root.pairOpen ? pairButton : (root.selfPeer ? selfAddPhoneButton : (root.groupPeer ? roomPeerAddButton : pairToggleButton));
+
+        if (action === "add-cancel")
+            return pairCancelButton;
 
         if (action === "paired-primary")
             return pairedPrimaryButton;
+
+        if (action === "room-peer-call")
+            return roomPeerCallButton;
 
         if (action === "role-switch")
             return roleSwitchButton;
 
         if (action === "clear-peer")
-            return root.advancedOpen ? advancedClearPeerButton : selfClearPeerButton;
+            return root.advancedOpen ? advancedClearPeerButton : (root.groupPeer ? roomPeerClearButton : selfClearPeerButton);
 
         if (action === "room")
             return roomHostButton;
+
+        if (action === "join-room")
+            return roomJoinButton;
 
         if (action === "room-cancel")
             return roomCancelButton;
@@ -836,6 +909,7 @@ Panel {
         } else if (action === "add-phone") {
             if (!pairOpen) {
                 roomConfirmOpen = false;
+                pairMode = "phone";
                 pairOpen = true;
                 Qt.callLater(function() {
                     pairField.forceActiveFocus();
@@ -844,8 +918,12 @@ Panel {
             } else {
                 joinPhone();
             }
+        } else if (action === "add-cancel") {
+            cancelAddPhone();
         } else if (action === "paired-primary") {
             activatePairedPrimary();
+        } else if (action === "room-peer-call") {
+            callPeer();
         } else if (action === "role-switch") {
             switchPairedRole();
         } else if (action === "clear-peer") {
@@ -863,6 +941,8 @@ Panel {
             copyInvite();
         else if (action === "room")
             openRoomConfirm();
+        else if (action === "join-room")
+            openRoomJoin();
         else if (action === "room-cancel")
             cancelRoomConfirm();
         else if (action === "room-start")
@@ -915,8 +995,11 @@ Panel {
         releasePtt();
         pairField.text = "";
         pairOpen = false;
+        pairMode = "phone";
         roomConfirmOpen = false;
         rotateConfirm = false;
+        keyboardNavigationActive = false;
+        helpHoverAction = "";
         root.controller.hide();
     }
 
@@ -950,6 +1033,7 @@ Panel {
         if (joinSuccessSequence > observedJoinSuccessSequence) {
             pairField.text = "";
             pairOpen = false;
+            pairMode = "phone";
             Qt.callLater(function() {
                 keyCatcher.forceActiveFocus();
             });
@@ -972,19 +1056,25 @@ Panel {
     onInSessionChanged: {
         if (inSession) {
             advancedOpen = false;
+            pairOpen = false;
+            pairMode = "phone";
             roomConfirmOpen = false;
             rotateConfirm = false;
             panelFlick.contentY = 0;
         }
     }
     onVisibleChanged: {
-        if (!visible)
+        if (!visible) {
             releasePtt();
-
+            keyboardNavigationActive = false;
+            helpHoverAction = "";
+        }
     }
     onOpenedChanged: {
         if (opened) {
             cursorActive = false;
+            keyboardNavigationActive = false;
+            helpHoverAction = "";
             actionIndex = 0;
             actionCursorId = mainActions.length > 0 ? String(mainActions[0]) : "";
             panelFlick.contentY = 0;
@@ -993,6 +1083,7 @@ Panel {
             releasePtt();
             pairField.text = "";
             pairOpen = false;
+            pairMode = "phone";
             roomConfirmOpen = false;
             rotateConfirm = false;
         }
@@ -1216,7 +1307,7 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: "Leave the other computer waiting, then try again."
+                                text: root.groupPeer ? "Keep the room host online, then try again." : "Leave the other computer waiting, then try again."
                                 color: Qt.darker(root.foreground, 1.25)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.caption
@@ -1236,7 +1327,7 @@ Panel {
 
                         Text {
                             width: parent.width
-                            text: "Set up your private phone. Omaphone creates one stable device identity and installs its checked, pinned phone engine."
+                            text: "Set up your private phone. Omaphone creates one stable private calling address and installs its checked, pinned phone engine."
                             color: Qt.darker(root.foreground, 1.35)
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.bodySmall
@@ -1378,7 +1469,7 @@ Panel {
                         }
 
                         CursorSurface {
-                            visible: root.selfPeer && !root.inSession && !root.advancedOpen
+                            visible: root.selfPeer && !root.pairOpen && !root.inSession && !root.advancedOpen
                             width: parent.width
                             implicitHeight: selfPeerColumn.implicitHeight + Style.space(18)
                             current: true
@@ -1464,7 +1555,7 @@ Panel {
                         }
 
                         Column {
-                            visible: !root.selfPeer && !root.hasPeer && !root.inSession && !root.advancedOpen
+                            visible: !root.selfPeer && !root.hasPeer && !root.pairOpen && !root.inSession && !root.advancedOpen
                             width: parent.width
                             spacing: Style.space(7)
 
@@ -1529,7 +1620,101 @@ Panel {
                         }
 
                         Column {
-                            visible: !root.selfPeer && root.hasPeer && !root.inSession && !root.advancedOpen
+                            visible: !root.selfPeer && root.groupPeer && !root.pairOpen && !root.inSession && !root.advancedOpen
+                            width: parent.width
+                            spacing: Style.space(7)
+
+                            PanelSectionHeader {
+                                text: "SAVED ROOM"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "This room invite occupies the one saved-call slot. Rejoin while its host is online, or add a phone to replace it."
+                                color: Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Button {
+                                id: roomPeerCallButton
+
+                                width: parent.width
+                                text: "Rejoin room"
+                                iconText: "󰌷"
+                                bordered: true
+                                enabled: !root.commandBusy
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("room-peer-call")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("room-peer-call");
+
+                                }
+                                onClicked: root.callPeer()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Rejoin saved room"
+                                Accessible.description: "Connect while the room host is still online"
+                                Accessible.onPressAction: root.callPeer()
+                            }
+
+                            Button {
+                                id: roomPeerAddButton
+
+                                width: parent.width
+                                text: "Add a phone instead"
+                                iconText: "󰏲"
+                                leftAlign: true
+                                enabled: !root.commandBusy
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("add-phone")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("add-phone");
+
+                                }
+                                onClicked: root.togglePair()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Add a phone instead"
+                                Accessible.description: "Replace the saved room with a phone's private contact card"
+                                Accessible.onPressAction: root.togglePair()
+                            }
+
+                            Button {
+                                id: roomPeerClearButton
+
+                                width: parent.width
+                                text: "Clear room invite"
+                                iconText: "󰆴"
+                                enabled: !root.commandBusy
+                                foreground: root.urgent
+                                accent: root.urgent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("clear-peer")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("clear-peer");
+
+                                }
+                                onClicked: root.clearPeer()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Clear saved room invite"
+                                Accessible.description: "Remove the saved room address and call key from this phone"
+                                Accessible.onPressAction: root.clearPeer()
+                            }
+
+                        }
+
+                        Column {
+                            visible: !root.selfPeer && root.hasPeer && !root.groupPeer && !root.pairOpen && !root.inSession && !root.advancedOpen
                             width: parent.width
                             spacing: Style.space(7)
 
@@ -1604,34 +1789,46 @@ Panel {
                             spacing: Style.space(7)
 
                             PanelSectionHeader {
-                                text: "ADD A PHONE"
+                                text: root.pairMode === "room" ? "JOIN A ROOM" : "ADD A PHONE"
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: root.pairMode === "room" ? (root.groupPeer ? "This replaces the saved room invite and call key." : (root.hasPeer ? "This replaces your paired phone and call key until you add that phone's contact card again." : "A room invite becomes this phone's saved call until you add a phone later.")) : (root.groupPeer ? "This replaces the saved room invite and call key." : (root.hasPeer ? "This replaces the current paired phone and call key." : "A private contact card contains this phone's address and encryption key. Send it only to the person you want to call."))
+                                color: root.pairMode === "room" || root.hasPeer ? root.urgent : Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
+                            }
+
+                            TextField {
+                                id: pairField
+
+                                width: parent.width
+                                placeholderText: root.pairMode === "room" ? "Paste the room invite" : "Paste their private contact card"
+                                password: true
+                                foreground: root.foreground
+                                accent: root.accent
+                                enabled: !root.commandBusy
+                                onAccepted: root.joinPhone()
+                                Keys.onPressed: function(event) {
+                                    root.handleEditorKeys(event);
+                                }
+                                Accessible.name: placeholderText
+                                Accessible.description: root.hasPeer ? "Connecting replaces the current saved call and call key" : ""
                             }
 
                             Row {
                                 width: parent.width
                                 spacing: Style.space(7)
 
-                                TextField {
-                                    id: pairField
-
-                                    width: parent.width - pairButton.width - parent.spacing
-                                    placeholderText: "Paste their private contact card"
-                                    password: true
-                                    foreground: root.foreground
-                                    accent: root.accent
-                                    enabled: !root.commandBusy
-                                    onAccepted: root.joinPhone()
-                                    Keys.onPressed: function(event) {
-                                        root.handleEditorKeys(event);
-                                    }
-                                }
-
                                 Button {
                                     id: pairButton
 
-                                    text: "Add & connect"
+                                    width: (parent.width - parent.spacing) / 2
+                                    text: root.pairMode === "room" ? (root.hasPeer ? "Replace & join" : "Join room") : (root.hasPeer ? "Replace & connect" : "Add & connect")
                                     bordered: true
                                     enabled: !root.commandBusy && String(pairField.text || "").trim() !== ""
                                     foreground: root.foreground
@@ -1645,19 +1842,33 @@ Panel {
                                     }
                                     onClicked: root.joinPhone()
                                     Accessible.role: Accessible.Button
-                                    Accessible.name: "Add and connect"
+                                    Accessible.name: text
+                                    Accessible.description: root.hasPeer ? "Replace the current saved call and call key with this card, then connect" : (root.pairMode === "room" ? "Save this room invite and connect" : "Save this private contact card and connect")
                                     Accessible.onPressAction: root.joinPhone()
                                 }
 
-                            }
+                                Button {
+                                    id: pairCancelButton
 
-                            Text {
-                                width: parent.width
-                                text: "A private contact card contains this phone's address and encryption key. Send it only to the person you want to call."
-                                color: Qt.darker(root.foreground, 1.35)
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.font.caption
-                                wrapMode: Text.WordWrap
+                                    width: (parent.width - parent.spacing) / 2
+                                    text: "Cancel"
+                                    bordered: true
+                                    enabled: !root.commandBusy
+                                    foreground: root.foreground
+                                    accent: root.accent
+                                    fontFamily: root.fontFamily
+                                    hasCursor: root.actionHasCursor("add-cancel")
+                                    onHovered: function(hovered) {
+                                        if (hovered)
+                                            root.selectAction("add-cancel");
+
+                                    }
+                                    onClicked: root.cancelAddPhone()
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: root.pairMode === "room" ? "Cancel joining room" : "Cancel adding phone"
+                                    Accessible.onPressAction: root.cancelAddPhone()
+                                }
+
                             }
 
                         }
@@ -1681,11 +1892,42 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: "Joining? Return to the phone, choose Add a phone, paste the room invite, then Add & connect. Hosting uses this computer as the relay; no public server or port forwarding."
+                                text: "Join with a host's room invite, or use this computer as the relay. Hosting needs no public server or port forwarding."
                                 color: Qt.darker(root.foreground, 1.35)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
                                 wrapMode: Text.WordWrap
+                            }
+
+                            Button {
+                                id: roomJoinButton
+
+                                width: parent.width
+                                text: "Join a room"
+                                iconText: "󰌷"
+                                leftAlign: true
+                                bordered: true
+                                enabled: !root.commandBusy
+                                foreground: root.foreground
+                                accent: root.accent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("join-room")
+                                onHovered: function(hovered) {
+                                    root.handleHelpHover("join-room", hovered);
+                                }
+                                onClicked: root.openRoomJoin()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Join a room"
+                                Accessible.description: root.hasPeer ? "Paste a host's room invite; it replaces the current saved call and call key" : "Paste a private room invite from its host"
+                                Accessible.onPressAction: root.openRoomJoin()
+
+                                PanelToolTip {
+                                    visible: root.helpVisible("join-room")
+                                    text: "Paste the private room invite from its host."
+                                    panelForeground: root.foreground
+                                    fontFamily: root.fontFamily
+                                }
+
                             }
 
                             Button {
@@ -1832,7 +2074,7 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: "The other computer stays waiting. Only this computer connects."
+                                text: root.groupPeer ? "The room host must stay online. This computer connects." : "The other computer stays waiting. Only this computer connects."
                                 color: Qt.darker(root.foreground, 1.35)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
@@ -1917,7 +2159,7 @@ Panel {
                             Text {
                                 visible: root.relayReady
                                 width: parent.width
-                                text: "On every participant's computer: Add a phone → paste the room invite → Add & connect. Share the same room invite privately with everyone."
+                                text: "On every participant's computer: Advanced → Join a room → paste the room invite → confirm the join. Share the same invite privately with everyone."
                                 color: Qt.darker(root.foreground, 1.35)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.caption
@@ -2001,7 +2243,7 @@ Panel {
 
                                     Text {
                                         anchors.horizontalCenter: parent.horizontalCenter
-                                        text: root.phoneStatus.remoteTalking === true ? "Listen now; reply when they finish" : "Press and hold, then let go"
+                                        text: root.phoneStatus.remoteTalking === true ? "Listen now; reply when they finish" : "Hold to record. Release to send."
                                         color: Qt.darker(root.foreground, 1.4)
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.caption
@@ -2191,7 +2433,7 @@ Panel {
                                 spacing: Style.space(8)
 
                                 Column {
-                                    width: parent.width - copyButton.width - parent.spacing
+                                    width: parent.width - (copyButton.visible ? copyButton.width + parent.spacing : 0)
                                     spacing: Style.space(1)
 
                                     Text {
@@ -2206,8 +2448,8 @@ Panel {
 
                                     Text {
                                         width: parent.width
-                                        text: "Keep invite codes private — each one includes your call key."
-                                        color: Qt.darker(root.foreground, 1.5)
+                                        text: root.groupPeer ? "A room key is active. Add your phone again before copying a contact card." : "Keep contact cards private — each one includes your call key."
+                                        color: root.groupPeer ? root.urgent : Qt.darker(root.foreground, 1.5)
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.caption
                                         wrapMode: Text.WordWrap
@@ -2218,7 +2460,8 @@ Panel {
                                 Button {
                                     id: copyButton
 
-                                    text: root.clipboardBusy ? "Copying…" : "Copy invite"
+                                    visible: !root.groupPeer
+                                    text: root.clipboardBusy ? "Copying…" : "Copy contact card"
                                     iconText: "󰆏"
                                     bordered: true
                                     enabled: !root.commandBusy && !root.clipboardBusy
@@ -2227,15 +2470,21 @@ Panel {
                                     fontFamily: root.fontFamily
                                     hasCursor: root.actionHasCursor("copy")
                                     onHovered: function(hovered) {
-                                        if (hovered)
-                                            root.selectAction("copy");
-
+                                        root.handleHelpHover("copy", hovered);
                                     }
                                     onClicked: root.copyInvite()
                                     Accessible.role: Accessible.Button
-                                    Accessible.name: "Copy my private invite"
-                                    Accessible.description: "The invite contains the room key"
+                                    Accessible.name: "Copy my private contact card"
+                                    Accessible.description: "Copies this phone's private contact card, including its address and call key"
                                     Accessible.onPressAction: root.copyInvite()
+
+                                    PanelToolTip {
+                                        visible: root.helpVisible("copy")
+                                        text: "Includes your private calling address and shared call key."
+                                        panelForeground: root.foreground
+                                        fontFamily: root.fontFamily
+                                    }
+
                                 }
 
                             }
@@ -2255,14 +2504,21 @@ Panel {
                             fontFamily: root.fontFamily
                             hasCursor: root.actionHasCursor("advanced")
                             onHovered: function(hovered) {
-                                if (hovered)
-                                    root.selectAction("advanced");
-
+                                root.handleHelpHover("advanced", hovered);
                             }
                             onClicked: root.toggleAdvanced()
                             Accessible.role: Accessible.Button
                             Accessible.name: text
+                            Accessible.description: root.advancedOpen ? "Return to your phone" : "Audio, connection, privacy, and troubleshooting settings"
                             Accessible.onPressAction: root.toggleAdvanced()
+
+                            PanelToolTip {
+                                visible: root.helpVisible("advanced")
+                                text: root.advancedOpen ? "Return to your phone." : "Audio, connection, privacy, and troubleshooting settings."
+                                panelForeground: root.foreground
+                                fontFamily: root.fontFamily
+                            }
+
                         }
 
                         Column {
@@ -2284,7 +2540,7 @@ Panel {
 
                             Text {
                                 width: parent.width
-                                text: "Advanced only: call a full Tor address directly. The paired-phone buttons are simpler and safer for normal calls."
+                                text: "For TerminalPhone troubleshooting only. Paste the other phone's full .onion address; both phones must already share the same call key."
                                 color: Qt.darker(root.foreground, 1.35)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.caption
@@ -2351,7 +2607,7 @@ Panel {
                                     id: qualityDropdown
 
                                     width: (parent.width - parent.spacing) / 2
-                                    label: "QUALITY"
+                                    label: "VOICE QUALITY"
                                     value: "balanced"
                                     options: [{
                                         "value": "low",
@@ -2369,24 +2625,31 @@ Panel {
                                     enabled: !root.commandBusy && !root.inSession
                                     hasCursor: root.actionHasCursor("quality")
                                     onHovered: function(hovered) {
-                                        if (hovered)
-                                            root.selectAction("quality");
-
+                                        root.handleHelpHover("quality", hovered);
                                     }
                                     onChanged: function(value) {
                                         root.setConfig("quality", value);
                                     }
                                     Accessible.role: Accessible.ComboBox
                                     Accessible.name: "Call quality, " + currentLabel()
+                                    Accessible.description: "Low saves data; Balanced is recommended; High needs a steadier Tor connection"
                                     Accessible.focusable: true
                                     Accessible.onPressAction: open()
+
+                                    PanelToolTip {
+                                        visible: root.helpVisible("quality") && !qualityDropdown.popupOpen
+                                        text: "Low saves data; High needs a steadier Tor connection."
+                                        panelForeground: root.foreground
+                                        fontFamily: root.fontFamily
+                                    }
+
                                 }
 
                                 Dropdown {
                                     id: chimeDropdown
 
                                     width: (parent.width - parent.spacing) / 2
-                                    label: "CHIME"
+                                    label: "TALK SOUND"
                                     value: "tone"
                                     options: [{
                                         "value": "off",
@@ -2413,17 +2676,24 @@ Panel {
                                     enabled: !root.commandBusy && !root.inSession
                                     hasCursor: root.actionHasCursor("chime")
                                     onHovered: function(hovered) {
-                                        if (hovered)
-                                            root.selectAction("chime");
-
+                                        root.handleHelpHover("chime", hovered);
                                     }
                                     onChanged: function(value) {
                                         root.setConfig("chime", value);
                                     }
                                     Accessible.role: Accessible.ComboBox
-                                    Accessible.name: "Push-to-talk chime, " + currentLabel()
+                                    Accessible.name: "Talk sound, " + currentLabel()
+                                    Accessible.description: "Plays when the other person starts recording; Off also silences call-status sounds"
                                     Accessible.focusable: true
                                     Accessible.onPressAction: open()
+
+                                    PanelToolTip {
+                                        visible: root.helpVisible("chime") && !chimeDropdown.popupOpen
+                                        text: "Plays when they talk. Off also silences call cues."
+                                        panelForeground: root.foreground
+                                        fontFamily: root.fontFamily
+                                    }
+
                                 }
 
                             }
@@ -2432,7 +2702,7 @@ Panel {
                                 id: voiceDropdown
 
                                 width: parent.width
-                                label: "VOICE EFFECT"
+                                label: "VOICE STYLE"
                                 value: "none"
                                 options: [{
                                     "value": "none",
@@ -2459,25 +2729,32 @@ Panel {
                                 enabled: !root.commandBusy && !root.inSession
                                 hasCursor: root.actionHasCursor("voice")
                                 onHovered: function(hovered) {
-                                    if (hovered)
-                                        root.selectAction("voice");
-
+                                    root.handleHelpHover("voice", hovered);
                                 }
                                 onChanged: function(value) {
                                     root.setConfig("voiceEffect", value);
                                 }
                                 Accessible.role: Accessible.ComboBox
-                                Accessible.name: "Voice effect, " + currentLabel()
+                                Accessible.name: "Voice style, " + currentLabel()
+                                Accessible.description: "Changes the clips you send; effects are for fun, not reliable voice disguises"
                                 Accessible.focusable: true
                                 Accessible.onPressAction: open()
+
+                                PanelToolTip {
+                                    visible: root.helpVisible("voice") && !voiceDropdown.popupOpen
+                                    text: "Changes sent clips; not a reliable voice disguise."
+                                    panelForeground: root.foreground
+                                    fontFamily: root.fontFamily
+                                }
+
                             }
 
                             Toggle {
                                 id: snowflakeToggle
 
                                 width: parent.width
-                                label: "Snowflake for blocked networks"
-                                description: root.snowflakeEnabled && !root.snowflakeAvailable ? "The optional Snowflake client is missing. Turn this off to use normal Tor." : "Use only when this network blocks normal Tor. Requires the optional Snowflake package, installed separately so you can review it."
+                                label: "Snowflake connection"
+                                description: root.snowflakeEnabled && !root.snowflakeAvailable ? "Its optional client is missing. Turn this off to use normal Tor." : (root.snowflakeAvailable ? "Helps Tor connect through temporary volunteer proxies when this network blocks Tor. Leave it off unless normal calls fail." : "Helps Tor connect through temporary volunteer proxies when this network blocks Tor. Its optional package is not installed.")
                                 checked: root.settingBool("snowflake", false)
                                 enabled: !root.commandBusy && !root.inSession && (root.snowflakeAvailable || root.snowflakeEnabled)
                                 foreground: root.foreground
@@ -2485,17 +2762,23 @@ Panel {
                                 fontFamily: root.fontFamily
                                 hasCursor: root.actionHasCursor("snowflake")
                                 onHovered: function(hovered) {
-                                    if (hovered)
-                                        root.selectAction("snowflake");
-
+                                    root.handleHelpHover("snowflake", hovered);
                                 }
                                 onClicked: root.toggleSnowflake()
                                 Accessible.role: Accessible.CheckBox
                                 Accessible.name: label
-                                Accessible.description: description
+                                Accessible.description: description + " It changes how Tor connects; it is not an extra privacy mode."
                                 Accessible.checked: checked
                                 Accessible.focusable: enabled
                                 Accessible.onPressAction: root.toggleSnowflake()
+
+                                PanelToolTip {
+                                    visible: root.helpVisible("snowflake") || snowflakeToggle.activeFocus
+                                    text: "Tor via volunteer proxies for blocked networks, not an extra privacy mode."
+                                    panelForeground: root.foreground
+                                    fontFamily: root.fontFamily
+                                }
+
                             }
 
                             Toggle {
@@ -2503,7 +2786,7 @@ Panel {
 
                                 width: parent.width
                                 label: "Message verification"
-                                description: "Check each message against the shared call key. Recommended."
+                                description: "Checks that voice and text came from someone with this call's private key. Keep this on; both phones must match."
                                 checked: root.settingBool("hmac", true)
                                 enabled: !root.commandBusy && !root.inSession
                                 foreground: root.foreground
@@ -2538,14 +2821,21 @@ Panel {
                                 fontFamily: root.fontFamily
                                 hasCursor: root.actionHasCursor("audio")
                                 onHovered: function(hovered) {
-                                    if (hovered)
-                                        root.selectAction("audio");
-
+                                    root.handleHelpHover("audio", hovered);
                                 }
                                 onClicked: root.runAudioTest()
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Run audio test"
+                                Accessible.description: "Records 3 seconds, then plays it back to test your microphone and speakers"
                                 Accessible.onPressAction: root.runAudioTest()
+
+                                PanelToolTip {
+                                    visible: root.helpVisible("audio")
+                                    text: "Records 3 seconds, then plays it back through your speakers."
+                                    panelForeground: root.foreground
+                                    fontFamily: root.fontFamily
+                                }
+
                             }
 
                             Button {
@@ -2553,7 +2843,7 @@ Panel {
 
                                 visible: root.hasPeer
                                 width: parent.width
-                                text: "Clear paired phone"
+                                text: root.groupPeer ? "Clear saved room invite" : "Clear paired phone"
                                 iconText: "󰆴"
                                 leftAlign: true
                                 bordered: true
@@ -2569,8 +2859,8 @@ Panel {
                                 }
                                 onClicked: root.clearPeer()
                                 Accessible.role: Accessible.Button
-                                Accessible.name: "Clear paired phone"
-                                Accessible.description: "Remove the one saved phone from this computer"
+                                Accessible.name: text
+                                Accessible.description: root.groupPeer ? "Remove the saved room address and call key from this phone" : "Remove the one saved phone from this computer"
                                 Accessible.onPressAction: root.clearPeer()
                             }
 
@@ -2610,21 +2900,36 @@ Panel {
                                 leftAlign: true
                                 bordered: true
                                 enabled: !root.commandBusy && !root.online && !root.inSession
-                                tooltipText: root.online ? "Go offline before changing your calling address" : ""
                                 foreground: root.urgent
                                 accent: root.urgent
                                 fontFamily: root.fontFamily
                                 hasCursor: root.actionHasCursor("rotate")
                                 onHovered: function(hovered) {
-                                    if (hovered)
-                                        root.selectAction("rotate");
-
+                                    root.handleHelpHover("rotate", hovered);
                                 }
                                 onClicked: root.rotateConfirm = true
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Change my calling address"
-                                Accessible.description: "Existing invites will stop working"
+                                Accessible.description: root.online ? "Go offline first; changing the address makes existing contact cards stop working" : "Creates a new private address; old contact cards stop working"
                                 Accessible.onPressAction: root.rotateConfirm = true
+
+                                PanelToolTip {
+                                    visible: root.helpVisible("rotate")
+                                    text: "Creates a new private address; old contact cards stop working."
+                                    panelForeground: root.foreground
+                                    fontFamily: root.fontFamily
+                                }
+
+                            }
+
+                            Text {
+                                visible: root.online && !root.rotateConfirm
+                                width: parent.width
+                                text: "Go offline before changing your calling address."
+                                color: Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
                             }
 
                             CursorSurface {

@@ -145,15 +145,18 @@ disk. Participants save the room key as their current call key when they use
 the invite, so they should still treat it like a password. A clipboard manager
 may retain a copied room invite after the room stops.
 
-To join a room, choose **Add a phone**, paste the host's room invite, then
-choose **Add & connect**. There is no separate online or call step; the relay
-identifies the connection as a group call. Although it uses the same private
-code field, a room invite is a shared room capability, not a phone contact.
+To join a room, open **Advanced**, choose **Join a room**, paste the host's
+private room invite, then choose **Join room**. There is no separate online or
+call step; the relay identifies the connection as a group call. A room invite
+is a shared room capability, not a phone contact.
 
 A room invite uses the same one-pair slot as a direct call. Joining a room
 therefore replaces the paired phone and call key remembered on that device.
-After the room, add the direct phone's private contact card again to restore
-that pairing.
+If a phone is already paired, the final button says **Replace & join** and the
+panel warns before applying it. After the call, Omaphone shows the saved room
+separately instead of pretending it is a paired phone: rejoin while the host is
+online, clear it, or choose **Add a phone instead**. Re-adding a phone is also
+explicit: the final button says **Replace & connect**.
 
 To host a room:
 
@@ -190,7 +193,8 @@ in [Security](docs/SECURITY.md#group-room-hosting) before inviting people.
 **Install missing tools** uses PolicyKit for package-manager approval. It
 does not store or bypass an administrator password. Normal Tor calls and group
 rooms do not need Snowflake. It is only an alternative way to reach Tor on a
-network that blocks it.
+network that blocks it: Tor connects through temporary volunteer proxies.
+Snowflake changes how Tor gets online; it is not an extra privacy mode.
 
 Omaphone does not silently build optional AUR software. If you need Snowflake,
 review the AUR package and its build instructions, then install the compatible

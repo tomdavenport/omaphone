@@ -32,8 +32,9 @@ Quickshell interface.
 Direct calls are the everyday experience. An experimental room mode can also
 turn one local machine into a multi-caller relay—no public server, public IP,
 or port forwarding required. The machine must stay online, the host instance
-cannot join its own room, and participants should take turns: this is
-record-then-send push-to-talk, not live audio mixing.
+cannot join its own room, and participants join through **Advanced → Join a
+room** with the host's private room invite. Everyone should take turns: this
+is record-then-send push-to-talk, not live audio mixing.
 
 ## Feature bullets
 
@@ -45,7 +46,8 @@ record-then-send push-to-talk, not live audio mixing.
 - Clear Tor progress, connected, speaking, and waiting states.
 - Experimental small-group rooms hosted from a local machine.
 - Audio test, quality presets, voice effects, and chimes.
-- Optional Snowflake and message-authentication controls.
+- Optional Snowflake help for networks that block Tor, plus message
+  verification controls.
 - Native Omarchy theming, keyboard access, and bar integration.
 - A checksum-verified TerminalPhone backend pinned to an exact revision.
 

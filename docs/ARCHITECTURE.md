@@ -38,7 +38,10 @@ the user's `/run/user/<uid>` directory and finally a UID-namespaced temporary
 directory. Durable backend, onion identity, and room configuration use XDG
 data. A hosted room's separate secret lives only in the supervisor invocation.
 Derived status and bounded message history use XDG state. The app configuration
-also stores one validated paired address and a preferred caller/listener role.
+also stores one validated paired address, whether it is a direct phone or a
+group room, and a preferred caller/listener role. The room/direct marker is an
+authenticated optional field in Omaphone's version-1 invite. Older invites
+without it safely remain direct contacts, and older Omaphone clients ignore it.
 TerminalPhone keeps one stable onion identity and one global shared secret in
 its private profile; Omaphone 1.2 does not create a separate number or key per
 person. Every Omaphone directory is checked for user ownership and set to mode

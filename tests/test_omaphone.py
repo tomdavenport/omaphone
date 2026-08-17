@@ -196,8 +196,8 @@ class PathAndPermissionTests(TemporaryPathsTestCase):
 class ReleaseContractTests(unittest.TestCase):
     def test_manifest_version_matches_backend_handshake_version(self) -> None:
         manifest = json.loads((REPOSITORY_ROOT / "manifest.json").read_text("utf-8"))
-        self.assertEqual(manifest["version"], "1.2.0")
-        self.assertEqual(omaphone.BACKEND_VERSION, "1.2.0")
+        self.assertEqual(manifest["version"], "1.2.1")
+        self.assertEqual(omaphone.BACKEND_VERSION, "1.2.1")
         self.assertEqual(manifest["version"], omaphone.BACKEND_VERSION)
 
     def test_snowflake_package_and_recovery_commands_match_the_binary_contract(self) -> None:
@@ -253,7 +253,8 @@ class ReleaseContractTests(unittest.TestCase):
         )
         self.assertNotIn("Use an invite", panel)
         self.assertNotIn("Go online before placing a call", service)
-        self.assertIn("Advanced only: call a full Tor address directly", panel)
+        self.assertIn("For TerminalPhone troubleshooting only", panel)
+        self.assertIn("both phones must already share the same call key", panel)
 
         for literal in ("**Share my phone**", "**Add a phone**", "**Add & connect**"):
             self.assertIn(literal, first_call)
@@ -264,10 +265,108 @@ class ReleaseContractTests(unittest.TestCase):
         self.assertIn("one stable", first_call)
         self.assertIn("one global direct-call secret", first_call)
 
+    def test_advanced_help_and_room_join_keep_plain_english_accessibility_contract(self) -> None:
+        panel = (REPOSITORY_ROOT / "Panel.qml").read_text("utf-8")
+        readme = (REPOSITORY_ROOT / "README.md").read_text("utf-8")
+
+        room_join = panel.split("id: roomJoinButton", 1)[1].split(
+            "id: roomHostButton", 1
+        )[0]
+        self.assertIn('text: "Join a room"', room_join)
+        self.assertIn("PanelToolTip {", room_join)
+        self.assertIn('text: "Paste the private room invite from its host."', room_join)
+        self.assertIn('Accessible.name: "Join a room"', room_join)
+        self.assertIn("it replaces the current saved call and call key", room_join)
+        for literal in (
+            'property string pairMode: "phone"',
+            'text: root.pairMode === "room" ? "JOIN A ROOM" : "ADD A PHONE"',
+            'placeholderText: root.pairMode === "room" ? "Paste the room invite"',
+            'root.hasPeer ? "Replace & join" : "Join room"',
+            'root.hasPeer ? "Replace & connect" : "Add & connect"',
+            "This replaces your paired phone and call key until you add that phone's contact card again.",
+            "This replaces the saved room invite and call key.",
+            'Accessible.description: root.hasPeer ? "Connecting replaces the current saved call and call key"',
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, panel)
+
+        quality = panel.split("id: qualityDropdown", 1)[1].split(
+            "id: chimeDropdown", 1
+        )[0]
+        self.assertIn('label: "VOICE QUALITY"', quality)
+        self.assertIn("PanelToolTip {", quality)
+        self.assertIn("Low saves data; Balanced is recommended", quality)
+
+        chime = panel.split("id: chimeDropdown", 1)[1].split(
+            "id: voiceDropdown", 1
+        )[0]
+        self.assertIn('label: "TALK SOUND"', chime)
+        self.assertIn("PanelToolTip {", chime)
+        self.assertIn("Off also silences call-status sounds", chime)
+
+        voice = panel.split("id: voiceDropdown", 1)[1].split(
+            "id: snowflakeToggle", 1
+        )[0]
+        self.assertIn('label: "VOICE STYLE"', voice)
+        self.assertIn("PanelToolTip {", voice)
+        self.assertIn("not reliable voice disguises", voice)
+
+        snowflake = panel.split("id: snowflakeToggle", 1)[1].split(
+            "id: hmacToggle", 1
+        )[0]
+        self.assertIn('label: "Snowflake connection"', snowflake)
+        self.assertIn("Helps Tor connect through temporary volunteer proxies", snowflake)
+        self.assertIn("Leave it off unless normal calls fail", snowflake)
+        self.assertIn("PanelToolTip {", snowflake)
+        self.assertIn("not an extra privacy mode", snowflake)
+        self.assertNotIn("extra encryption", snowflake)
+        self.assertIn("Accessible.description: description +", snowflake)
+
+        verification = panel.split("id: hmacToggle", 1)[1].split(
+            "id: audioButton", 1
+        )[0]
+        self.assertIn('label: "Message verification"', verification)
+        self.assertIn("Keep this on; both phones must match", verification)
+        self.assertIn("Accessible.description: description", verification)
+
+        audio_test = panel.split("id: audioButton", 1)[1].split(
+            "id: advancedClearPeerButton", 1
+        )[0]
+        self.assertIn('text: "Audio test"', audio_test)
+        self.assertIn("PanelToolTip {", audio_test)
+        self.assertIn("Records 3 seconds, then plays it back", audio_test)
+        self.assertIn("Accessible.description:", audio_test)
+
+        for literal in (
+            'property string helpHoverAction: ""',
+            "function handleHelpHover(action, hovered)",
+            "function helpVisible(action)",
+            'readonly property bool groupPeer: peerKind === "group"',
+            'text: "SAVED ROOM"',
+            'text: "Rejoin room"',
+            'text: "Add a phone instead"',
+            'visible: !root.groupPeer',
+            "A room key is active. Add your phone again before copying a contact card.",
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, panel)
+
+        room_docs = readme.split("## Host a group room", 1)[1].split(
+            "## Requirements", 1
+        )[0]
+        normalized_room_docs = " ".join(room_docs.split())
+        self.assertIn(
+            "open **Advanced**, choose **Join a room**, paste the host's private "
+            "room invite, then choose **Join room**",
+            normalized_room_docs,
+        )
+        self.assertNotIn("choose **Add a phone**", room_docs)
+
     def test_service_consumes_guided_status_and_uses_atomic_backend_commands(self) -> None:
         service = (REPOSITORY_ROOT / "Service.qml").read_text("utf-8")
         for field in (
             "pairedAddress",
+            "peerKind",
             "hasPeer",
             "selfPeer",
             "preferredRole",
@@ -457,23 +556,55 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
 
     def test_invite_round_trip_with_and_without_address(self) -> None:
         no_address = omaphone.parse_invite(omaphone.create_invite(VALID_SECRET))
-        self.assertEqual(no_address, omaphone.Invite(VALID_SECRET, "", True))
+        self.assertEqual(no_address, omaphone.Invite(VALID_SECRET, "", True, "direct"))
 
         invitation = omaphone.create_invite(VALID_SECRET, f"HTTPS://{VALID_ONION.upper()}///")
         self.assertTrue(invitation.startswith(omaphone.INVITE_PREFIX))
         self.assertEqual(
             omaphone.parse_invite(f" \n{invitation}\t"),
-            omaphone.Invite(VALID_SECRET, VALID_ONION, True),
+            omaphone.Invite(VALID_SECRET, VALID_ONION, True, "direct"),
         )
 
         hmac_disabled = omaphone.create_invite(VALID_SECRET, SECOND_ONION, hmac_enabled=False)
         self.assertEqual(
             omaphone.parse_invite(hmac_disabled),
-            omaphone.Invite(VALID_SECRET, SECOND_ONION, False),
+            omaphone.Invite(VALID_SECRET, SECOND_ONION, False, "direct"),
         )
 
-        legacy = encode_invite({"address": "", "secret": VALID_SECRET, "version": 1})
-        self.assertEqual(omaphone.parse_invite(legacy), omaphone.Invite(VALID_SECRET, "", True))
+        group = omaphone.create_invite(
+            VALID_SECRET, SECOND_ONION, hmac_enabled=True, kind="group"
+        )
+        self.assertEqual(
+            omaphone.parse_invite(group),
+            omaphone.Invite(VALID_SECRET, SECOND_ONION, True, "group"),
+        )
+
+        legacy = encode_invite(
+            {"address": VALID_ONION, "secret": VALID_SECRET, "version": 1}
+        )
+        self.assertEqual(
+            omaphone.parse_invite(legacy),
+            omaphone.Invite(VALID_SECRET, VALID_ONION, True, "direct"),
+        )
+
+    def test_invite_kind_is_covered_by_the_v1_authentication_tag(self) -> None:
+        invitation = omaphone.create_invite(
+            VALID_SECRET, VALID_ONION, kind="direct"
+        )
+        encoded = invitation[len(omaphone.INVITE_PREFIX) :]
+        raw = base64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        payload, original_tag = raw[:-32], raw[-32:]
+        value = json.loads(payload.decode("utf-8"))
+        value["kind"] = "group"
+        tampered_payload = json.dumps(
+            value, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+        tampered = omaphone.INVITE_PREFIX + base64.urlsafe_b64encode(
+            tampered_payload + original_tag
+        ).decode("ascii").rstrip("=")
+
+        with self.assertRaisesRegex(omaphone.OmaphoneError, "checksum"):
+            omaphone.parse_invite(tampered)
 
     def test_invite_tampering_is_rejected(self) -> None:
         invitation = omaphone.create_invite(VALID_SECRET, VALID_ONION)
@@ -513,6 +644,18 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
             {"address": 7, "secret": VALID_SECRET, "version": 1},
             {"address": "example.com", "secret": VALID_SECRET, "version": 1},
             {
+                "address": VALID_ONION,
+                "kind": "conference",
+                "secret": VALID_SECRET,
+                "version": 1,
+            },
+            {
+                "address": VALID_ONION,
+                "kind": [],
+                "secret": VALID_SECRET,
+                "version": 1,
+            },
+            {
                 "address": "",
                 "roomSettings": {"hmac": "false"},
                 "secret": VALID_SECRET,
@@ -531,6 +674,13 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
                 with self.assertRaises(omaphone.OmaphoneError):
                     omaphone.parse_invite(encode_invite(payload))
 
+        for invalid_kind in ("conference", "DIRECT", True, []):
+            with self.subTest(create_kind=invalid_kind):
+                with self.assertRaisesRegex(omaphone.OmaphoneError, "direct or group"):
+                    omaphone.create_invite(
+                        VALID_SECRET, VALID_ONION, kind=invalid_kind  # type: ignore[arg-type]
+                    )
+
     def test_status_never_serializes_room_secret(self) -> None:
         omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
         omaphone.atomic_json(
@@ -547,6 +697,7 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
         self.assertNotIn(VALID_SECRET, serialized)
         self.assertNotIn("secret", status_value)
         self.assertTrue(status_value["configured"])
+        self.assertEqual(status_value["peerKind"], "")
 
     def test_initial_status_reports_missing_snowflake_without_blocking_normal_tor(self) -> None:
         omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
@@ -583,6 +734,7 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
             {
                 "settings": dict(omaphone.DEFAULT_SETTINGS),
                 "peerAddress": VALID_ONION,
+                "peerKind": "direct",
                 "preferredRole": "caller",
             },
         )
@@ -597,8 +749,30 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
         self.assertEqual(status_value["pairedAddress"], VALID_ONION)
         self.assertTrue(status_value["hasPeer"])
         self.assertTrue(status_value["selfPeer"])
+        self.assertEqual(status_value["peerKind"], "direct")
         self.assertEqual(status_value["preferredRole"], "caller")
         self.assertNotIn(VALID_SECRET, json.dumps(status_value, sort_keys=True))
+
+    def test_initial_status_exposes_group_peer_kind(self) -> None:
+        omaphone.save_app_config(
+            self.paths,
+            {
+                "settings": dict(omaphone.DEFAULT_SETTINGS),
+                "peerAddress": SECOND_ONION,
+                "peerKind": "group",
+                "preferredRole": "caller",
+            },
+        )
+        with (
+            mock.patch.object(omaphone, "backend_installed", return_value=False),
+            mock.patch.object(omaphone, "dependency_status", return_value=[]),
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+        ):
+            status_value = omaphone.build_initial_status(self.paths)
+
+        self.assertEqual(status_value["pairedAddress"], SECOND_ONION)
+        self.assertEqual(status_value["peerKind"], "group")
+        self.assertTrue(status_value["hasPeer"])
 
     def test_call_outcome_survives_daemon_restart_as_fixed_bounded_copy(self) -> None:
         omaphone.atomic_json(
@@ -640,6 +814,7 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
 
                     self.assertEqual(status_value["preferredRole"], expected_role)
                     self.assertEqual(status_value["pairedAddress"], VALID_ONION)
+                    self.assertEqual(status_value["peerKind"], "direct")
                     self.assertTrue(status_value["hasPeer"])
                     # Migration is presentation-only until the next explicit
                     # listen/call action chooses and persists a role.
@@ -753,9 +928,40 @@ class ConfigurationTests(TemporaryPathsTestCase):
             {
                 "settings": expected_settings,
                 "peerAddress": VALID_ONION,
+                "peerKind": "direct",
                 "preferredRole": "",
             },
         )
+
+    def test_peer_kind_is_validated_and_legacy_peers_migrate_to_direct(self) -> None:
+        base = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+        }
+        cases = (
+            ({}, "direct"),
+            ({"peerKind": "direct"}, "direct"),
+            ({"peerKind": "group"}, "group"),
+            ({"peerKind": "conference"}, "direct"),
+            ({"peerKind": True}, "direct"),
+            ({"peerKind": []}, "direct"),
+        )
+        for extra, expected in cases:
+            with self.subTest(extra=extra):
+                omaphone.atomic_json(self.paths.app_config, {**base, **extra})
+                self.assertEqual(
+                    omaphone.load_app_config(self.paths)["peerKind"], expected
+                )
+
+        for no_peer in ("", "not-an-onion"):
+            with self.subTest(no_peer=no_peer):
+                omaphone.atomic_json(
+                    self.paths.app_config,
+                    {**base, "peerAddress": no_peer, "peerKind": "group"},
+                )
+                loaded = omaphone.load_app_config(self.paths)
+                self.assertEqual(loaded["peerAddress"], "")
+                self.assertEqual(loaded["peerKind"], "")
 
     def test_preferred_role_migrates_old_config_and_accepts_only_known_roles(self) -> None:
         legacy = {
@@ -765,6 +971,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
         omaphone.atomic_json(self.paths.app_config, legacy)
         migrated = omaphone.load_app_config(self.paths)
         self.assertEqual(migrated["peerAddress"], VALID_ONION)
+        self.assertEqual(migrated["peerKind"], "direct")
         self.assertEqual(migrated["preferredRole"], "")
 
         for role in ("caller", "listener"):
@@ -796,6 +1003,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
                 loaded = omaphone.load_app_config(self.paths)
                 self.assertEqual(loaded["settings"], omaphone.DEFAULT_SETTINGS)
                 self.assertEqual(loaded["peerAddress"], "")
+                self.assertEqual(loaded["peerKind"], "")
                 self.assertEqual(loaded["preferredRole"], "")
 
     def test_save_config_serializes_app_and_exact_safe_upstream_format(self) -> None:
@@ -808,6 +1016,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
                 "hmac": False,
             },
             "peerAddress": SECOND_ONION,
+            "peerKind": "group",
             "preferredRole": "caller",
         }
         omaphone.save_app_config(self.paths, config)
@@ -1681,10 +1890,12 @@ class SupervisorContractTests(TemporaryPathsTestCase):
             VALID_SECRET,
             SECOND_ONION,
             hmac_enabled=False,
+            kind="group",
         )
         current_config = {
             "settings": dict(omaphone.DEFAULT_SETTINGS),
             "peerAddress": VALID_ONION,
+            "peerKind": "direct",
             "preferredRole": "listener",
         }
         events: list[str] = []
@@ -1700,6 +1911,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
             return {
                 "settings": dict(current_config["settings"]),
                 "peerAddress": current_config["peerAddress"],
+                "peerKind": current_config["peerKind"],
                 "preferredRole": current_config["preferredRole"],
             }
 
@@ -1738,6 +1950,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertEqual(len(saved_configs), 1)
         saved = saved_configs[0]
         self.assertEqual(saved["peerAddress"], SECOND_ONION)
+        self.assertEqual(saved["peerKind"], "group")
         self.assertEqual(saved["preferredRole"], "caller")
         self.assertFalse(saved["settings"]["hmac"])  # type: ignore[index]
 
@@ -1745,6 +1958,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         previous_config = {
             "settings": dict(omaphone.DEFAULT_SETTINGS),
             "peerAddress": VALID_ONION,
+            "peerKind": "direct",
             "preferredRole": "listener",
         }
         previous_secret = VALID_SECRET
@@ -1759,7 +1973,12 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         )
         supervisor._quiesce_listener = mock.Mock(return_value=True)
         supervisor._start_invocation = mock.Mock()
-        invitation = omaphone.create_invite(next_secret, SECOND_ONION, hmac_enabled=False)
+        invitation = omaphone.create_invite(
+            next_secret,
+            SECOND_ONION,
+            hmac_enabled=False,
+            kind="group",
+        )
         original_atomic_write = omaphone.atomic_write
         injected = False
 
@@ -1811,6 +2030,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
                 supervisor._transition.assert_called_once_with("call", SECOND_ONION)
                 saved = omaphone.load_app_config(self.paths)
                 self.assertEqual(saved["peerAddress"], SECOND_ONION)
+                self.assertEqual(saved["peerKind"], "direct")
                 self.assertEqual(saved["preferredRole"], "caller")
                 self.assertFalse(omaphone.desired_online(self.paths))
 
@@ -1838,6 +2058,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         config = {
             "settings": dict(omaphone.DEFAULT_SETTINGS),
             "peerAddress": VALID_ONION,
+            "peerKind": "group",
             "preferredRole": "caller",
         }
         omaphone.save_app_config(self.paths, config)
@@ -1858,6 +2079,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertTrue(response["ok"])
         saved = omaphone.load_app_config(self.paths)
         self.assertEqual(saved["peerAddress"], "")
+        self.assertEqual(saved["peerKind"], "")
         self.assertEqual(saved["preferredRole"], "")
         self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
         self.assertTrue(omaphone.desired_online(self.paths))
@@ -1993,6 +2215,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         current_config = {
             "settings": dict(omaphone.DEFAULT_SETTINGS),
             "peerAddress": VALID_ONION,
+            "peerKind": "direct",
         }
 
         with (
@@ -2007,6 +2230,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertEqual(supervisor.status["remoteAddress"], SECOND_ONION)
         saved_config = save_config.call_args.args[1]
         self.assertEqual(saved_config["peerAddress"], SECOND_ONION)
+        self.assertEqual(saved_config["peerKind"], "direct")
         self.assertFalse(saved_config["settings"]["hmac"])
         write_secret.assert_called_once_with(self.paths.secret_file, VALID_SECRET.encode("ascii"))
 
@@ -2139,12 +2363,20 @@ class SupervisorContractTests(TemporaryPathsTestCase):
 
     def test_listener_remembers_incoming_peer_only_with_message_authentication(self) -> None:
         omaphone.ensure_layout(self.paths)
-        for enabled, expected_peer in ((False, ""), (True, SECOND_ONION)):
+        for enabled, expected_peer, expected_kind in (
+            (False, "", ""),
+            (True, SECOND_ONION, "direct"),
+        ):
             with self.subTest(hmac=enabled):
                 settings = {**omaphone.DEFAULT_SETTINGS, "hmac": enabled}
                 omaphone.save_app_config(
                     self.paths,
-                    {"settings": settings, "peerAddress": "", "preferredRole": "listener"},
+                    {
+                        "settings": settings,
+                        "peerAddress": "",
+                        "peerKind": "",
+                        "preferredRole": "listener",
+                    },
                 )
                 supervisor = object.__new__(omaphone.Supervisor)
                 supervisor.paths = self.paths
@@ -2162,9 +2394,9 @@ class SupervisorContractTests(TemporaryPathsTestCase):
                     omaphone.OutputEvent("connected", SECOND_ONION)
                 )
 
-                self.assertEqual(
-                    omaphone.load_app_config(self.paths)["peerAddress"], expected_peer
-                )
+                saved = omaphone.load_app_config(self.paths)
+                self.assertEqual(saved["peerAddress"], expected_peer)
+                self.assertEqual(saved["peerKind"], expected_kind)
 
     def test_group_call_and_room_size_reset_across_direct_listening_end_and_offline(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
@@ -2297,6 +2529,9 @@ class SupervisorContractTests(TemporaryPathsTestCase):
     def test_relay_invites_use_one_ephemeral_secret_per_ready_invocation(self) -> None:
         omaphone.ensure_layout(self.paths)
         omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        omaphone.atomic_write(
+            self.paths.onion_file, (VALID_ONION + "\n").encode("ascii")
+        )
         supervisor = object.__new__(omaphone.Supervisor)
         supervisor.paths = self.paths
         supervisor.selector = mock.Mock()
@@ -2334,8 +2569,12 @@ class SupervisorContractTests(TemporaryPathsTestCase):
             first_invocation.relay_ready = True
             first_copy = supervisor.dispatch({"command": "invite"})
             second_copy = supervisor.dispatch({"command": "invite"})
-            first_secret = omaphone.parse_invite(first_copy["invite"]).secret
-            self.assertEqual(omaphone.parse_invite(second_copy["invite"]).secret, first_secret)
+            first_invite = omaphone.parse_invite(first_copy["invite"])
+            second_invite = omaphone.parse_invite(second_copy["invite"])
+            first_secret = first_invite.secret
+            self.assertEqual(second_invite.secret, first_secret)
+            self.assertEqual(first_invite.kind, "group")
+            self.assertEqual(second_invite.kind, "group")
             self.assertEqual(first_secret, first_invocation.relay_secret)
 
             supervisor.invocation = None
@@ -2347,16 +2586,20 @@ class SupervisorContractTests(TemporaryPathsTestCase):
                 self.fail("second relay invocation was not created")
             second_invocation.relay_ready = True
             next_copy = supervisor.dispatch({"command": "invite"})
-            next_secret = omaphone.parse_invite(next_copy["invite"]).secret
+            next_invite = omaphone.parse_invite(next_copy["invite"])
+            next_secret = next_invite.secret
 
         self.assertNotEqual(next_secret, first_secret)
         self.assertEqual(next_secret, second_invocation.relay_secret)
+        self.assertEqual(next_invite.kind, "group")
         self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
 
         supervisor.invocation = None
         supervisor.status["phase"] = "offline"
         direct_copy = supervisor.dispatch({"command": "invite"})
-        self.assertEqual(omaphone.parse_invite(direct_copy["invite"]).secret, VALID_SECRET)
+        direct_invite = omaphone.parse_invite(direct_copy["invite"])
+        self.assertEqual(direct_invite.secret, VALID_SECRET)
+        self.assertEqual(direct_invite.kind, "direct")
         self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
 
     def test_relay_invite_fails_closed_during_listener_transition(self) -> None:
@@ -2376,9 +2619,25 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertIn("not ready", response["error"])
         self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
 
+    def test_ready_relay_invite_fails_closed_without_a_host_address(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        invocation = self.invocation("relay")
+        invocation.relay_secret = omaphone._random_secret()
+        invocation.relay_ready = True
+        supervisor = self.bare_supervisor(invocation, phase="relay")
+
+        response = supervisor.dispatch({"command": "invite"})
+
+        self.assertFalse(response["ok"])
+        self.assertNotIn("invite", response)
+        self.assertIn("address is not ready", response["error"])
+
     def test_relay_secret_is_repr_hidden_and_never_persisted_in_status(self) -> None:
         omaphone.ensure_layout(self.paths)
         omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        omaphone.atomic_write(
+            self.paths.onion_file, (VALID_ONION + "\n").encode("ascii")
+        )
         relay_secret = omaphone._random_secret()
         invocation = self.invocation("relay")
         invocation.relay_secret = relay_secret

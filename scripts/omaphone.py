@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA_VERSION = 1
-BACKEND_VERSION = "1.2.0"
+BACKEND_VERSION = "1.2.1"
 UPSTREAM_COMMIT = "67c8167dae167276b1ba69ac66b79b3abedceef8"
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/edengilbertus/terminalphone/"
@@ -97,6 +97,7 @@ VOICE_EFFECTS = {"none", "deep", "high", "robot", "echo", "whisper"}
 CHIMES = {"off", "tone", "double", "chirp", "ding", "click"}
 BOOL_CONFIG_KEYS = {"snowflake", "hmac"}
 PREFERRED_ROLES = {"", "caller", "listener"}
+PEER_KINDS = {"direct", "group"}
 CALL_STAGES = {"", "preparing", "opening-tor", "dialing"}
 CALL_OUTCOMES = {"", "failed", "timeout"}
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
@@ -444,12 +445,24 @@ def load_app_config(paths: Paths) -> dict[str, Any]:
         peer = ""
     if peer and not ONION_RE.fullmatch(peer):
         peer = ""
+    peer_kind = ""
+    if peer:
+        raw_peer_kind = raw.get("peerKind") if isinstance(raw, dict) else None
+        # Version 1.2.0 and older stored only an address. Those peers were all
+        # direct calls, so a missing or invalid classification safely migrates
+        # to direct without exposing an unvalidated value in status.
+        peer_kind = (
+            raw_peer_kind
+            if isinstance(raw_peer_kind, str) and raw_peer_kind in PEER_KINDS
+            else "direct"
+        )
     preferred_role = raw.get("preferredRole", "") if isinstance(raw, dict) else ""
     if not isinstance(preferred_role, str) or preferred_role not in PREFERRED_ROLES:
         preferred_role = ""
     return {
         "settings": settings,
         "peerAddress": peer,
+        "peerKind": peer_kind,
         "preferredRole": preferred_role,
     }
 
@@ -501,15 +514,29 @@ class Invite:
     secret: str = dataclasses.field(repr=False)
     address: str
     hmac: bool = True
+    kind: str = "direct"
 
 
-def create_invite(secret: str, address: str = "", hmac_enabled: bool = True) -> str:
+def create_invite(
+    secret: str,
+    address: str = "",
+    hmac_enabled: bool = True,
+    kind: str = "direct",
+) -> str:
     if not valid_secret(secret):
         raise OmaphoneError("room secret is missing or invalid")
     if address:
         address = normalize_onion_address(address)
+    if not isinstance(kind, str) or kind not in PEER_KINDS:
+        raise OmaphoneError("invite kind must be direct or group")
     payload = json.dumps(
-        {"address": address, "roomSettings": {"hmac": bool(hmac_enabled)}, "secret": secret, "version": 1},
+        {
+            "address": address,
+            "kind": kind,
+            "roomSettings": {"hmac": bool(hmac_enabled)},
+            "secret": secret,
+            "version": 1,
+        },
         sort_keys=True,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -538,8 +565,15 @@ def parse_invite(code: str) -> Invite:
         raise OmaphoneError("unsupported Omaphone invite")
     secret = value.get("secret")
     address = value.get("address", "")
+    kind = value.get("kind", "direct")
     room_settings = value.get("roomSettings", {})
-    if not isinstance(secret, str) or not valid_secret(secret) or not isinstance(address, str):
+    if (
+        not isinstance(secret, str)
+        or not valid_secret(secret)
+        or not isinstance(address, str)
+        or not isinstance(kind, str)
+        or kind not in PEER_KINDS
+    ):
         raise OmaphoneError("invalid Omaphone invite")
     if not isinstance(room_settings, dict) or set(room_settings) - {"hmac"}:
         raise OmaphoneError("invalid Omaphone room settings")
@@ -551,7 +585,7 @@ def parse_invite(code: str) -> Invite:
         raise OmaphoneError("invalid Omaphone invite checksum")
     if address:
         address = normalize_onion_address(address)
-    return Invite(secret, address, hmac_enabled)
+    return Invite(secret, address, hmac_enabled, kind)
 
 
 def snowflake_available(which: Callable[[str], str | None] | None = None) -> bool:
@@ -593,6 +627,7 @@ def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]
         "onion": "",
         "remoteAddress": "",
         "pairedAddress": "",
+        "peerKind": "",
         "hasPeer": False,
         "selfPeer": False,
         "preferredRole": "",
@@ -901,6 +936,7 @@ def build_initial_status(paths: Paths) -> dict[str, Any]:
             "onion": onion,
             "remoteAddress": paired_address,
             "pairedAddress": paired_address,
+            "peerKind": config["peerKind"],
             "hasPeer": bool(paired_address),
             "selfPeer": bool(paired_address and onion and paired_address == onion),
             "preferredRole": effective_preferred_role(config, listening=online),
@@ -1038,6 +1074,7 @@ class Supervisor:
                 "settings": config["settings"],
                 "onion": onion,
                 "pairedAddress": paired_address,
+                "peerKind": config.get("peerKind", "direct" if paired_address else ""),
                 "hasPeer": bool(paired_address),
                 "selfPeer": bool(
                     paired_address and onion and paired_address == onion
@@ -1507,6 +1544,7 @@ class Supervisor:
                     peer = config["peerAddress"]
                     if not peer or peer == self._local_onion():
                         config["peerAddress"] = event.value
+                        config["peerKind"] = "direct"
                         try:
                             atomic_json(self.paths.app_config, config)
                         except OSError:
@@ -1868,6 +1906,7 @@ class Supervisor:
                     raise OmaphoneError("another TerminalPhone action is already active")
                 config = load_app_config(self.paths)
                 config["peerAddress"] = address
+                config["peerKind"] = "direct"
                 config["preferredRole"] = "caller"
                 try:
                     self._save_wrapper_config(config)
@@ -1990,9 +2029,13 @@ class Supervisor:
                 previous_config = {
                     "settings": dict(config["settings"]),
                     "peerAddress": config["peerAddress"],
+                    "peerKind": config.get(
+                        "peerKind", "direct" if config["peerAddress"] else ""
+                    ),
                     "preferredRole": config.get("preferredRole", ""),
                 }
                 config["peerAddress"] = invite.address
+                config["peerKind"] = invite.kind if invite.address else ""
                 config["settings"]["hmac"] = invite.hmac
                 config["preferredRole"] = "caller"
                 restart = self._quiesce_listener()
@@ -2036,9 +2079,13 @@ class Supervisor:
                 previous_config = {
                     "settings": dict(config["settings"]),
                     "peerAddress": config["peerAddress"],
+                    "peerKind": config.get(
+                        "peerKind", "direct" if config["peerAddress"] else ""
+                    ),
                     "preferredRole": config.get("preferredRole", ""),
                 }
                 config["peerAddress"] = invite.address
+                config["peerKind"] = invite.kind
                 config["settings"]["hmac"] = invite.hmac
                 config["preferredRole"] = "caller"
                 restart = self._quiesce_listener()
@@ -2068,6 +2115,7 @@ class Supervisor:
                 config = load_app_config(self.paths)
                 restart = self._quiesce_listener()
                 config["peerAddress"] = ""
+                config["peerKind"] = ""
                 config["preferredRole"] = ""
                 try:
                     save_app_config(self.paths, config)
@@ -2106,12 +2154,22 @@ class Supervisor:
                     ):
                         raise OmaphoneError("group host is not ready to share an invite")
                     secret = invocation.relay_secret
+                    kind = "group"
                 else:
                     secret = read_secret(self.paths)
+                    kind = "direct"
                 if not secret:
                     raise OmaphoneError("run setup before creating an invite")
+                address = read_onion(self.paths)
+                if kind == "group" and not address:
+                    raise OmaphoneError("group host address is not ready to share")
                 config = load_app_config(self.paths)
-                code = create_invite(secret, read_onion(self.paths), config["settings"]["hmac"])
+                code = create_invite(
+                    secret,
+                    address,
+                    config["settings"]["hmac"],
+                    kind,
+                )
                 return self._response(invite=code)
             return self._error(f"unknown command: {command}")
         except OmaphoneError as exc:
