@@ -1,0 +1,28 @@
+{
+  "schemaVersion": 1,
+  "id": "omaphone.phone",
+  "name": "Omaphone",
+  "version": "1.0.0",
+  "author": "Tom Davenport",
+  "license": "MIT",
+  "description": "A native Omarchy push-to-talk phone powered by TerminalPhone.",
+  "kinds": [
+    "service",
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Omaphone",
+    "description": "Private onion calls, push-to-talk audio, and encrypted chat.",
+    "category": "Communication",
+    "aliases": [
+      "phone",
+      "terminalphone"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

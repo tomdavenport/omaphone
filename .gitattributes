@@ -1,0 +1,3 @@
+# Preserve the exact pinned upstream bytes, including its original whitespace.
+vendor/terminalphone.sh -text whitespace=-trailing-space,-blank-at-eof
+vendor/TerminalPhone-LICENSE -text

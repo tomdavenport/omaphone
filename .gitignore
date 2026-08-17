@@ -1,0 +1,8 @@
+mcp-shell.log
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+
+# Local test and runtime artefacts. Real Omaphone state lives below XDG dirs.
+.tmp/
