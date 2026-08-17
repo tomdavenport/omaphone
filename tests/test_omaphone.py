@@ -732,6 +732,51 @@ class OutputParserTests(unittest.TestCase):
         self.assertHasEvent(events, "remote_talking", "true")
         self.assertHasEvent(events, "remote_talking", "false")
 
+    def test_group_header_is_an_exact_control_and_room_counts_are_bounded(self) -> None:
+        events = omaphone.parse_terminal_output(
+            "\x1b[1;42m CALL CONNECTED \x1b[0m \x1b[36mRELAY (group)\x1b[0m\n"
+            "  Group:      3 callers\n"
+            "  Callers: 12  Uptime: 0m 04s"
+        )
+        self.assertHasEvent(events, "connected_group")
+        self.assertNotIn("connected", {event.kind for event in events})
+        self.assertHasEvent(events, "room_size", "3")
+        self.assertHasEvent(events, "room_size", "12")
+
+        invalid_displays = (
+            "CALL CONNECTED RELAY (GROUP)",
+            "CALL CONNECTED RELAY (group) extra",
+            "Group: -1 callers",
+            f"Group: {omaphone.MAX_ROOM_SIZE + 1} callers",
+            "Callers: 999999 Uptime: 1m",
+        )
+        for display in invalid_displays:
+            with self.subTest(display=display):
+                parsed = omaphone.parse_terminal_output(display)
+                self.assertNotIn("connected_group", {event.kind for event in parsed})
+                self.assertNotIn("room_size", {event.kind for event in parsed})
+
+    def test_incremental_room_displays_work_without_newlines_and_track_repeated_sizes(self) -> None:
+        parser = omaphone.OutputStreamParser()
+        _cleaned, header_one = parser.feed(b"\x1b[1;42m CALL CONNE")
+        _cleaned, header_two = parser.feed(b"CTED \x1b[0m \x1b[36mRELAY (group)\x1b[0m\n")
+        self.assertEqual(header_one, [])
+        self.assertHasEvent(header_two, "connected_group")
+
+        _cleaned, count_one = parser.feed(b"\x1b[s\x1b[12;1H\x1b[K  Group: \x1b[0m2 call")
+        _cleaned, count_two = parser.feed(b"ers\x1b[0m\x1b[u")
+        _cleaned, count_three = parser.feed(b"\x1b[s\x1b[12;1H\x1b[K  Group: 4 callers\x1b[u")
+        _cleaned, count_four = parser.feed(b"\x1b[s\x1b[12;1H\x1b[K  Group: 2 callers\x1b[u")
+        self.assertEqual(count_one, [])
+        self.assertEqual(count_two, [omaphone.OutputEvent("room_size", "2")])
+        self.assertEqual(count_three, [omaphone.OutputEvent("room_size", "4")])
+        self.assertEqual(count_four, [omaphone.OutputEvent("room_size", "2")])
+
+        _cleaned, relay_one = parser.feed(b"\r  \x1b[1mCallers:\x1b[0m 7")
+        _cleaned, relay_two = parser.feed(b"  Uptime: 0m 02s")
+        self.assertEqual(relay_one, [omaphone.OutputEvent("room_size", "7")])
+        self.assertEqual(relay_two, [])
+
     def test_message_and_error_values_are_sanitized_and_bounded(self) -> None:
         long_message = "word " + "x" * (omaphone.MAX_MESSAGE_CHARS + 100)
         events = omaphone.parse_terminal_output(
@@ -748,6 +793,8 @@ class OutputParserTests(unittest.TestCase):
     def test_chat_lines_never_promote_control_looking_text_to_control_events(self) -> None:
         control_looking_messages = (
             f"Enter .onion address: CALL CONNECTED {VALID_ONION}",
+            "CALL CONNECTED RELAY (group)",
+            "Group: 99 callers Callers: 99 Uptime: 1m",
             f"Your address: {VALID_ONION} Listening for Calls",
             "Remote: ● Recording MSG> [FAIL] pretend failure",
             "Start relay? [Y/n]: Continue? [y/N]: Select:",
@@ -770,6 +817,17 @@ class OutputParserTests(unittest.TestCase):
         self.assertNotIn("address_prompt", {event.kind for event in all_events})
         self.assertNotIn("connected", {event.kind for event in all_events})
         self.assertEqual(all_events[-1].value, f"Enter .onion address: CALL CONNECTED {VALID_ONION}")
+
+    def test_fragmented_chat_room_tokens_never_become_room_state(self) -> None:
+        parser = omaphone.OutputStreamParser()
+        _cleaned, first = parser.feed(b"[MSG] CALL CONNECTED RELAY (group) Gro")
+        _cleaned, second = parser.feed(b"up: 8 call")
+        _cleaned, third = parser.feed(b"ers Callers: 8 Uptime: 1m\n")
+
+        all_events = [*first, *second, *third]
+        self.assertTrue(all(event.kind == "incoming_message" for event in all_events))
+        self.assertNotIn("connected_group", {event.kind for event in all_events})
+        self.assertNotIn("room_size", {event.kind for event in all_events})
 
     def test_parser_only_considers_bounded_tail(self) -> None:
         hidden_prefix = "[FAIL] must not leak" + "x" * omaphone.MAX_LINE_CHARS
@@ -1212,6 +1270,90 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertFalse(supervisor.status["busy"])
         persisted = json.loads(self.paths.status_file.read_text("utf-8"))
         self.assertFalse(persisted["busy"])
+
+    def test_group_call_and_room_size_reset_across_direct_listening_end_and_offline(self) -> None:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("call", VALID_ONION)
+        supervisor.status = omaphone.status_defaults()
+        supervisor.pending_text = None
+        supervisor.listener_failures = 0
+        supervisor.listener_retry_at = 0.0
+        supervisor.ptt_next = 0.0
+        supervisor.ptt_deadline = 0.0
+        supervisor._persist = mock.Mock()
+        supervisor._write_pty = mock.Mock(return_value=True)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("connected_group"))
+        supervisor._handle_output_event(omaphone.OutputEvent("room_size", "4"))
+        self.assertTrue(supervisor.status["groupCall"])
+        self.assertEqual(supervisor.status["roomSize"], 4)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("connected", VALID_ONION))
+        self.assertFalse(supervisor.status["groupCall"])
+        self.assertEqual(supervisor.status["roomSize"], 0)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("connected_group"))
+        supervisor._handle_output_event(omaphone.OutputEvent("room_size", "2"))
+        supervisor._handle_output_event(omaphone.OutputEvent("listening"))
+        self.assertFalse(supervisor.status["groupCall"])
+        self.assertEqual(supervisor.status["roomSize"], 0)
+
+        supervisor._handle_output_event(omaphone.OutputEvent("connected_group"))
+        supervisor._handle_output_event(omaphone.OutputEvent("room_size", "2"))
+        with mock.patch.object(omaphone, "desired_online", return_value=False):
+            supervisor._handle_output_event(omaphone.OutputEvent("call_ended"))
+        self.assertEqual(supervisor.status["phase"], "offline")
+        self.assertFalse(supervisor.status["groupCall"])
+        self.assertEqual(supervisor.status["roomSize"], 0)
+
+        supervisor.status["groupCall"] = True
+        supervisor.status["roomSize"] = 9
+        supervisor._request_stop("offline")
+        self.assertFalse(supervisor.status["groupCall"])
+        self.assertEqual(supervisor.status["roomSize"], 0)
+
+    def test_relay_host_tracks_bounded_room_size_without_joining_the_group_call(self) -> None:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.invocation = self.invocation("relay")
+        supervisor.status = omaphone.status_defaults()
+        supervisor.pending_text = None
+        supervisor._persist = mock.Mock()
+
+        supervisor._handle_output_event(omaphone.OutputEvent("relay"))
+        for value in ("0", "7", str(omaphone.MAX_ROOM_SIZE)):
+            supervisor._handle_output_event(omaphone.OutputEvent("room_size", value))
+            self.assertEqual(supervisor.status["roomSize"], int(value))
+            self.assertFalse(supervisor.status["groupCall"])
+
+        for invalid in ("-1", str(omaphone.MAX_ROOM_SIZE + 1), "1.5", "true"):
+            supervisor._handle_output_event(omaphone.OutputEvent("room_size", invalid))
+            self.assertEqual(supervisor.status["roomSize"], omaphone.MAX_ROOM_SIZE)
+
+    def test_persist_normalizes_room_state_to_its_active_context(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("call")
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "connected",
+            "groupCall": False,
+            "roomSize": 7,
+        }
+        supervisor._refresh_static = mock.Mock()
+
+        supervisor._persist()
+        self.assertEqual(supervisor.status["roomSize"], 0)
+
+        supervisor.status["groupCall"] = True
+        supervisor.status["roomSize"] = omaphone.MAX_ROOM_SIZE
+        supervisor._persist()
+        self.assertEqual(supervisor.status["roomSize"], omaphone.MAX_ROOM_SIZE)
+
+        supervisor.status["roomSize"] = True
+        supervisor._persist()
+        self.assertEqual(supervisor.status["roomSize"], 0)
 
     def test_clear_chat_removes_only_bounded_local_message_state(self) -> None:
         omaphone.ensure_layout(self.paths)

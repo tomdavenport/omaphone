@@ -2,10 +2,10 @@
   "schemaVersion": 1,
   "id": "omaphone.phone",
   "name": "Omaphone",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Tom Davenport",
   "license": "MIT",
-  "description": "A native Omarchy push-to-talk phone powered by TerminalPhone.",
+  "description": "A private walkie-talkie for calls, group rooms, and chat over Tor.",
   "kinds": [
     "service",
     "bar-widget"
@@ -16,7 +16,7 @@
   },
   "barWidget": {
     "displayName": "Omaphone",
-    "description": "Private onion calls, push-to-talk audio, and encrypted chat.",
+    "description": "Private calls, group rooms, push-to-talk audio, and chat over Tor.",
     "category": "Communication",
     "aliases": [
       "phone",

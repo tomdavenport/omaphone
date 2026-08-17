@@ -24,6 +24,8 @@ Item {
         "busy": false,
         "onion": "",
         "remoteAddress": "",
+        "groupCall": false,
+        "roomSize": 0,
         "localTalking": false,
         "remoteTalking": false,
         "messages": [],
@@ -85,6 +87,7 @@ Item {
             "snowflake": rawSettings.snowflake === true,
             "hmac": rawSettings.hmac !== false
         };
+        var safeRoomSize = typeof parsed.roomSize === "number" && isFinite(parsed.roomSize) ? Math.max(0, Math.min(10000, Math.floor(parsed.roomSize))) : 0;
         phoneStatus = {
             "schemaVersion": Number(parsed.schemaVersion || 1),
             "backendVersion": String(parsed.backendVersion || ""),
@@ -99,6 +102,8 @@ Item {
             "busy": parsed.busy === true,
             "onion": String(parsed.onion || ""),
             "remoteAddress": String(parsed.remoteAddress || ""),
+            "groupCall": parsed.groupCall === true,
+            "roomSize": safeRoomSize,
             "localTalking": parsed.localTalking === true,
             "remoteTalking": parsed.remoteTalking === true,
             "messages": safeMessages,
@@ -135,7 +140,7 @@ Item {
             return "Setup complete";
 
         if (kind === "install-deps")
-            return "Requirements installed";
+            return "Missing tools installed";
 
         if (kind === "online")
             return "Going online…";
@@ -147,7 +152,7 @@ Item {
             return "Calling…";
 
         if (kind === "pair")
-            return "Invite paired";
+            return "Invite used — your call key changed";
 
         if (kind === "audio-test")
             return "Audio test started";
@@ -156,10 +161,10 @@ Item {
             return "Ending call…";
 
         if (kind === "relay")
-            return "Relay started";
+            return "Group hosting started";
 
         if (kind === "rotate")
-            return "Rotating onion identity…";
+            return "Changing your calling address…";
 
         if (kind === "clear-chat")
             return "Local chat history cleared";
@@ -169,7 +174,7 @@ Item {
 
     function failureLabel(kind) {
         if (kind === "install-deps")
-            return "Could not install requirements";
+            return "Could not install the missing tools";
 
         if (kind === "audio-test")
             return "Audio test failed";
@@ -184,13 +189,16 @@ Item {
             return "Message was not sent";
 
         if (kind === "pair")
-            return "Could not pair that invite";
+            return "Could not use that invite";
 
         if (kind === "call")
             return "Could not place the call";
 
         if (kind === "rotate")
-            return "Identity rotation failed";
+            return "Could not change your calling address";
+
+        if (kind === "relay")
+            return "Could not host the group";
 
         if (kind === "clear-chat")
             return "Could not clear local chat history";
@@ -270,7 +278,7 @@ Item {
         }
         var address = String(value || "").trim();
         if (!addressIsSafe(address)) {
-            actionError = "Enter a full 56-character .onion address; paste invite codes into Pair instead";
+            actionError = "Paste a full 56-character .onion calling address here; use invite codes under Use an invite";
             return false;
         }
         return runAction(["call", address], "", "call");
@@ -282,7 +290,7 @@ Item {
 
         var invite = String(value || "").trim();
         if (invite === "") {
-            actionError = "Paste an Omaphone invite first";
+            actionError = "Paste an invite code first";
             return false;
         }
         // The opaque invite (and its embedded room secret) never enters argv.

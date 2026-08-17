@@ -27,9 +27,11 @@ operational assumptions of TerminalPhone or Tor.
 - The room secret is stored unencrypted on disk with mode `0600` so background
   listening can restart without a passphrase. Full-disk encryption protects a
   powered-off machine; a compromised or unlocked user account does not.
-- The recent in-widget text history is stored as bounded plaintext status with
-  the same user-only boundary. Use **Advanced → Clear local chat history** if
-  local message retention is inappropriate for the device.
+- The recent in-widget text history is stored as bounded local plaintext state
+  and appears in the user-only status snapshot used by the panel and CLI.
+  Another process running as the same user can read it. Use **Advanced → Clear
+  local chat history** if local message retention is inappropriate for the
+  device.
 - Contact identity is possession of an invite/shared secret, not a public-key
   identity ceremony. Confirm an invite through a second channel for sensitive
   use.
@@ -49,6 +51,40 @@ operational assumptions of TerminalPhone or Tor.
   routing policy; they are expert controls, not a universal security upgrade.
 - **Voice effects** alter outgoing audio but are not reliable speaker
   anonymization.
+
+## Group-room hosting
+
+The experimental group room is an upstream TerminalPhone relay. The host does
+not use the participants' shared room secret and does not decrypt their voice
+or text. It forwards matching protocol frames between callers. Every
+participant uses the same invite and therefore the same room secret; any
+participant with that secret can decrypt room content and may be able to
+impersonate another participant. There is no separate member identity,
+moderator, ban list, or admission service.
+
+Hosting does not need a public IP, router port forwarding, or a separate
+internet server because Tor publishes the relay's onion service. The host
+machine must remain awake and connected, and that Omaphone instance cannot
+speak or chat while it is acting as the relay.
+
+The relay operator still controls the forwarding point. They can observe
+connection count, timing, traffic volume, protocol message types, and
+unencrypted handshake/control fields. They can drop, delay, reorder, replay,
+or split traffic even though they cannot create valid authenticated room
+content without the secret. Relay greetings and group-count notices are not
+authenticated, so presence and room-size displays are informational rather
+than proof of who is present.
+
+The pinned upstream starts `socat` with `TCP-LISTEN` and no explicit bind
+address. On a typical host this listens on non-loopback interfaces as well as
+the loopback address used by Tor. Block non-loopback access to the listen port
+with the host firewall (TCP `7777` by default). Do not assume that the absence
+of router port forwarding prevents another device on the same LAN from
+reaching it.
+
+Group audio is still record-then-send push-to-talk. There is no live mixer,
+speaking queue, collision handling, or tested room capacity in Omaphone. Keep
+rooms small and agree that one person speaks at a time.
 
 ## Reporting a vulnerability
 

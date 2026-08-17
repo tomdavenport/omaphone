@@ -19,9 +19,10 @@ flowchart LR
 
 TerminalPhone 1.1.7 is a single interactive Bash program, not a library or
 daemon. Its in-call loop uses `stty`, one-byte reads, key-repeat timing, and
-ANSI cursor updates. It also keeps critical process state in memory, deletes
-stale run files at startup, and cleans up stored child PIDs on exit. Starting a
-second copy merely to ask for status can disrupt a live call.
+ANSI cursor updates. It keeps critical process state in memory and records
+helper-process IDs and pipes inside its profile. A second copy using that same
+profile could race with those files or clean up helpers owned by the active
+call. Omaphone therefore never starts a second copy merely to ask for status.
 
 The supervisor therefore runs exactly one upstream process in a real
 pseudo-terminal. It translates explicit UI actions into TerminalPhone's
@@ -32,10 +33,12 @@ UI change cannot silently change the parser contract.
 
 ## State and permissions
 
-Runtime socket/lock files use the per-user runtime directory when available.
-Durable backend, onion identity, and room configuration use XDG data. Derived
-status and bounded message history use XDG state. Directories are mode `0700`;
-the room secret and other sensitive files are mode `0600`.
+The supervisor socket and lifecycle lock use `XDG_RUNTIME_DIR`, falling back to
+the user's `/run/user/<uid>` directory and finally a UID-namespaced temporary
+directory. Durable backend, onion identity, and room configuration use XDG
+data. Derived status and bounded message history use XDG state. Every Omaphone
+directory is checked for user ownership and set to mode `0700`; the socket,
+room secret, lock, and other private files use mode `0600`.
 
 The UI never invokes TerminalPhone's `status` command. It reads only the
 supervisor's atomic JSON snapshot.
@@ -54,8 +57,9 @@ supervisor's atomic JSON snapshot.
   during recording, the supervisor stops transmission when the lease expires.
 - If the bundled upstream fails its pinned checksum, Omaphone refuses to copy
   or execute it.
-- If the supervisor is gone but a stale socket remains, the replacement first
-  acquires the lifecycle lock and then removes only that runtime socket.
+- If the supervisor is gone but its socket path remains, replacement code must
+  first acquire the lifecycle lock. It then removes only Omaphone's socket path
+  inside the already checked, user-owned runtime directory.
 - An offline supervisor with no shell clients retires after one minute, so a
   disabled or removed plugin does not leave an idle detached process behind.
 

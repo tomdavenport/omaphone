@@ -24,6 +24,8 @@ Panel {
         "busy": false,
         "onion": "",
         "remoteAddress": "",
+        "groupCall": false,
+        "roomSize": 0,
         "localTalking": false,
         "remoteTalking": false,
         "messages": [],
@@ -55,6 +57,8 @@ Panel {
     readonly property bool connected: phase === "connected"
     readonly property bool calling: phase === "calling"
     readonly property bool relaying: phase === "relay"
+    readonly property bool groupCall: phoneStatus.groupCall === true
+    readonly property int roomSize: typeof phoneStatus.roomSize === "number" && isFinite(phoneStatus.roomSize) ? Math.max(0, Math.min(10000, Math.floor(phoneStatus.roomSize))) : 0
     readonly property bool inSession: connected || calling || relaying
     readonly property bool ready: configured && backendInstalled && dependenciesReady
     readonly property bool pttHeld: pttPointerHeld || pttKeyboardHeld || pttAccessibleHeld
@@ -115,22 +119,22 @@ Panel {
             return "Set up Omaphone";
 
         if (phase === "starting")
-            return "Going online";
+            return "Connecting over Tor";
 
         if (phase === "listening")
-            return "Ready to call";
+            return "Ready for incoming calls";
 
         if (phase === "calling")
-            return "Calling";
+            return groupCall ? "Joining group" : "Calling";
 
         if (phase === "connected")
-            return shortAddress(phoneStatus.remoteAddress);
+            return groupCall ? "Group call" : shortAddress(phoneStatus.remoteAddress);
 
         if (phase === "testing")
             return "Testing audio";
 
         if (phase === "relay")
-            return "Relay active";
+            return "Hosting a group";
 
         if (phase === "error")
             return "Needs attention";
@@ -143,7 +147,7 @@ Panel {
 
         if (!ready) {
             if (missingDependencies.length > 0)
-                return "Requirements are missing";
+                return "Some calling tools are missing";
 
             return "A private push-to-talk phone";
         }
@@ -154,22 +158,25 @@ Panel {
             return "Recording voice";
 
         if (phase === "starting")
-            return "Starting Tor and your onion service";
+            return "Creating a private route";
 
         if (phase === "listening")
-            return "Listening for private calls";
+            return "Share an invite or call an address";
 
         if (phase === "calling")
             return shortAddress(phoneStatus.remoteAddress);
 
-        if (phase === "connected")
-            return "Connected over Tor";
+        if (phase === "connected") {
+            if (groupCall && roomSize > 0)
+                return peopleLabel(roomSize) + " connected over Tor";
 
+            return "Connected over Tor";
+        }
         if (phase === "testing")
             return "Check your speakers and microphone";
 
         if (phase === "relay")
-            return "Bridging encrypted group traffic";
+            return roomSize > 0 ? connectedLabel(roomSize) : "Passing messages between the group";
 
         if (phase === "error")
             return "Open the error below for details";
@@ -193,7 +200,7 @@ Panel {
             return "WORKING";
 
         if (phase === "relay")
-            return "RELAY";
+            return "HOSTING";
 
         if (phase === "error")
             return "ERROR";
@@ -212,11 +219,17 @@ Panel {
         if (!ready)
             return "Omaphone · setup needed";
 
-        if (connected)
-            return "Omaphone · connected to " + shortAddress(phoneStatus.remoteAddress);
+        if (connected) {
+            if (groupCall)
+                return roomSize > 0 ? "Omaphone · group call · " + peopleLabel(roomSize) : "Omaphone · group call";
 
+            return "Omaphone · connected to " + shortAddress(phoneStatus.remoteAddress);
+        }
         if (calling)
-            return "Omaphone · calling";
+            return groupCall ? "Omaphone · joining a group" : "Omaphone · calling";
+
+        if (relaying)
+            return roomSize > 0 ? "Omaphone · hosting · " + connectedLabel(roomSize) : "Omaphone · hosting a group";
 
         if (online)
             return "Omaphone · online";
@@ -233,6 +246,14 @@ Panel {
             return text;
 
         return text.substring(0, 14) + "…" + text.substring(text.length - 10);
+    }
+
+    function peopleLabel(count) {
+        return count === 1 ? "1 person" : String(count) + " people";
+    }
+
+    function connectedLabel(count) {
+        return count === 1 ? "1 connected" : String(count) + " connected";
     }
 
     function settingString(key, fallback) {
@@ -495,6 +516,45 @@ Panel {
     }
 
     function itemForAction(action) {
+        if (action === "setup")
+            return setupButton;
+
+        if (action === "install")
+            return installButton;
+
+        if (action === "online")
+            return onlineButton;
+
+        if (action === "call")
+            return callButton;
+
+        if (action === "pair")
+            return pairToggleButton;
+
+        if (action === "ptt")
+            return talkSurface;
+
+        if (action === "send")
+            return sendButton;
+
+        if (action === "hangup") {
+            if (root.calling)
+                return callingHangupButton;
+
+            if (root.relaying)
+                return hostingStopButton;
+
+            if (root.connected)
+                return connectedHangupButton;
+
+            return null;
+        }
+        if (action === "copy")
+            return copyButton;
+
+        if (action === "advanced")
+            return advancedButton;
+
         if (action === "quality")
             return qualityDropdown;
 
@@ -854,7 +914,7 @@ Panel {
 
                         Text {
                             width: parent.width
-                            text: "One short setup creates a private onion identity and installs the pinned, checksum-verified phone backend."
+                            text: "Set up your private phone. Omaphone creates your calling address and installs its checked, pinned phone engine."
                             color: Qt.darker(root.foreground, 1.35)
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.bodySmall
@@ -890,7 +950,7 @@ Panel {
 
                             visible: root.missingDependencies.length > 0
                             width: parent.width
-                            text: root.commandBusy ? "Installing…" : "Install requirements"
+                            text: root.commandBusy ? "Installing…" : "Install missing tools"
                             iconText: "󰏔"
                             bordered: true
                             enabled: !root.commandBusy
@@ -971,7 +1031,7 @@ Panel {
                                     id: dialField
 
                                     width: parent.width - callButton.width - parent.spacing
-                                    placeholderText: "Their .onion address"
+                                    placeholderText: "Paste their calling address"
                                     foreground: root.foreground
                                     accent: root.accent
                                     enabled: !root.commandBusy
@@ -999,7 +1059,7 @@ Panel {
                                     }
                                     onClicked: root.callAddress()
                                     Accessible.role: Accessible.Button
-                                    Accessible.name: "Call onion address"
+                                    Accessible.name: "Call this address"
                                     Accessible.onPressAction: root.callAddress()
                                 }
 
@@ -1009,7 +1069,7 @@ Panel {
                                 id: pairToggleButton
 
                                 width: parent.width
-                                text: root.pairOpen ? "Cancel pairing" : "Pair from an invite"
+                                text: root.pairOpen ? "Cancel" : "Use an invite"
                                 iconText: root.pairOpen ? "󰅖" : "󰌷"
                                 leftAlign: true
                                 enabled: !root.commandBusy
@@ -1035,7 +1095,7 @@ Panel {
                                 }
                                 Accessible.role: Accessible.Button
                                 Accessible.name: text
-                                Accessible.description: "Paste a private Omaphone invite"
+                                Accessible.description: "Paste a private Omaphone invite code; this replaces your current call key"
                                 Accessible.onPressAction: {
                                     root.pairOpen = !root.pairOpen;
                                     if (root.pairOpen)
@@ -1056,7 +1116,7 @@ Panel {
                                     id: pairField
 
                                     width: parent.width - pairButton.width - parent.spacing
-                                    placeholderText: "Paste opaque invite"
+                                    placeholderText: "Paste invite code"
                                     password: true
                                     foreground: root.foreground
                                     accent: root.accent
@@ -1070,7 +1130,7 @@ Panel {
                                 Button {
                                     id: pairButton
 
-                                    text: "Pair"
+                                    text: "Use invite"
                                     bordered: true
                                     enabled: !root.commandBusy && String(pairField.text || "").trim() !== ""
                                     foreground: root.foreground
@@ -1078,20 +1138,35 @@ Panel {
                                     fontFamily: root.fontFamily
                                     onClicked: root.pairInvite()
                                     Accessible.role: Accessible.Button
-                                    Accessible.name: "Pair invite"
+                                    Accessible.name: "Use invite code"
                                     Accessible.onPressAction: root.pairInvite()
                                 }
 
                             }
 
-                            Text {
+                            CursorSurface {
                                 visible: root.pairOpen
                                 width: parent.width
-                                text: "Invite codes are treated like passwords and sent to Omaphone only on stdin."
-                                color: Qt.darker(root.foreground, 1.5)
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.font.caption
-                                wrapMode: Text.WordWrap
+                                implicitHeight: inviteWarning.implicitHeight + Style.space(16)
+                                current: true
+                                foreground: root.urgent
+                                accent: root.urgent
+
+                                Text {
+                                    id: inviteWarning
+
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    anchors.leftMargin: Style.space(9)
+                                    anchors.rightMargin: Style.space(9)
+                                    text: "Omaphone does not save people yet. Using an invite replaces your current call key, so earlier invites may stop working. Keep invite codes private."
+                                    color: root.foreground
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.caption
+                                    wrapMode: Text.WordWrap
+                                }
+
                             }
 
                         }
@@ -1113,6 +1188,8 @@ Panel {
                             }
 
                             Button {
+                                id: callingHangupButton
+
                                 width: parent.width
                                 text: "Hang up"
                                 iconText: "󰅙"
@@ -1130,6 +1207,57 @@ Panel {
                                 onClicked: root.hangup()
                                 Accessible.role: Accessible.Button
                                 Accessible.name: "Hang up"
+                                Accessible.onPressAction: root.hangup()
+                            }
+
+                        }
+
+                        Column {
+                            visible: root.relaying
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            Text {
+                                width: parent.width
+                                text: root.roomSize > 0 ? root.connectedLabel(root.roomSize) : "Group host is running"
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.subtitle
+                                font.bold: true
+                                horizontalAlignment: Text.AlignHCenter
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: "This Omaphone only passes messages between the group. You cannot talk or chat while it is hosting."
+                                color: Qt.darker(root.foreground, 1.35)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                horizontalAlignment: Text.AlignHCenter
+                                wrapMode: Text.WordWrap
+                            }
+
+                            Button {
+                                id: hostingStopButton
+
+                                width: parent.width
+                                text: "Stop hosting"
+                                iconText: "󰇙"
+                                bordered: true
+                                enabled: !root.actionBusy
+                                foreground: root.urgent
+                                accent: root.urgent
+                                fontFamily: root.fontFamily
+                                hasCursor: root.actionHasCursor("hangup")
+                                onHovered: function(hovered) {
+                                    if (hovered)
+                                        root.selectAction("hangup");
+
+                                }
+                                onClicked: root.hangup()
+                                Accessible.role: Accessible.Button
+                                Accessible.name: "Stop hosting"
+                                Accessible.description: "Stop passing messages for this group"
                                 Accessible.onPressAction: root.hangup()
                             }
 
@@ -1158,7 +1286,7 @@ Panel {
                                 foreground: root.foreground
                                 accent: root.accent
                                 Accessible.role: Accessible.Button
-                                Accessible.name: root.phoneStatus.remoteTalking === true ? "Other person is talking" : (root.pttAccessibleHeld ? "Recording voice; activate again to send" : (root.pttHeld ? "Recording voice; release to send" : "Hold to talk"))
+                                Accessible.name: root.phoneStatus.remoteTalking === true ? (root.groupCall ? "Someone else is talking" : "Other person is talking") : (root.pttAccessibleHeld ? "Recording voice; activate again to send" : (root.pttHeld ? "Recording voice; release to send" : "Hold to talk"))
                                 Accessible.description: "Hold with a pointer or keyboard; assistive activation toggles recording with a ten second safety release"
                                 Accessible.focusable: true
                                 Accessible.focused: hasCursor
@@ -1176,7 +1304,7 @@ Panel {
 
                                     Text {
                                         anchors.horizontalCenter: parent.horizontalCenter
-                                        text: root.phoneStatus.remoteTalking === true ? "THEY ARE TALKING" : ((root.pttHeld || root.phoneStatus.localTalking === true) ? "RECORDING — RELEASE TO SEND" : "HOLD TO TALK")
+                                        text: root.phoneStatus.remoteTalking === true ? (root.groupCall ? "SOMEONE IS TALKING" : "THEY ARE TALKING") : ((root.pttHeld || root.phoneStatus.localTalking === true) ? "RECORDING — RELEASE TO SEND" : "HOLD TO TALK")
                                         color: root.foreground
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.subtitle
@@ -1263,6 +1391,8 @@ Panel {
                             }
 
                             Button {
+                                id: connectedHangupButton
+
                                 width: parent.width
                                 text: "Hang up"
                                 iconText: "󰅙"
@@ -1327,7 +1457,7 @@ Panel {
 
                                             Text {
                                                 width: parent.width
-                                                text: (root.messageOutgoing(modelData) ? "YOU" : "THEM") + (root.messageTime(modelData) === "" ? "" : " · " + root.messageTime(modelData))
+                                                text: (root.messageOutgoing(modelData) ? "YOU" : (root.groupCall ? "GROUP" : "THEM")) + (root.messageTime(modelData) === "" ? "" : " · " + root.messageTime(modelData))
                                                 color: Qt.darker(root.foreground, 1.35)
                                                 font.family: root.fontFamily
                                                 font.pixelSize: Style.font.caption
@@ -1363,7 +1493,7 @@ Panel {
                             }
 
                             PanelSectionHeader {
-                                text: "IDENTITY"
+                                text: "MY CALLING ADDRESS"
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
                             }
@@ -1388,7 +1518,7 @@ Panel {
 
                                     Text {
                                         width: parent.width
-                                        text: "Share the invite privately — it acts like a key."
+                                        text: "Keep invite codes private — each one includes your call key."
                                         color: Qt.darker(root.foreground, 1.5)
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.caption
@@ -1602,8 +1732,8 @@ Panel {
                                 id: snowflakeToggle
 
                                 width: parent.width
-                                label: "Snowflake"
-                                description: "Use Tor's censorship-circumvention transport."
+                                label: "Help Tor connect"
+                                description: "Use Snowflake when Tor is blocked on this network."
                                 checked: root.settingBool("snowflake", false)
                                 enabled: !root.commandBusy && !root.inSession
                                 foreground: root.foreground
@@ -1628,8 +1758,8 @@ Panel {
                                 id: hmacToggle
 
                                 width: parent.width
-                                label: "HMAC authentication"
-                                description: "Authenticate protocol messages with the shared room key. Recommended."
+                                label: "Message verification"
+                                description: "Check each message against the shared call key. Recommended."
                                 checked: root.settingBool("hmac", true)
                                 enabled: !root.commandBusy && !root.inSession
                                 foreground: root.foreground
@@ -1681,7 +1811,7 @@ Panel {
                                     id: relayButton
 
                                     width: (parent.width - parent.spacing) / 2
-                                    text: root.relaying ? "Stop relay" : "Start relay"
+                                    text: root.relaying ? "Stop hosting" : "Host a group"
                                     iconText: "󰑃"
                                     bordered: true
                                     enabled: root.relaying ? !root.actionBusy : (!root.commandBusy && !root.inSession)
@@ -1702,7 +1832,7 @@ Panel {
                                     }
                                     Accessible.role: Accessible.Button
                                     Accessible.name: text
-                                    Accessible.description: "Bridge encrypted group traffic"
+                                    Accessible.description: root.relaying ? "Stop passing messages for this group" : "Experimental; pass messages between a group without joining the conversation"
                                     Accessible.onPressAction: {
                                         if (root.relaying)
                                             root.hangup();
@@ -1711,6 +1841,15 @@ Panel {
                                     }
                                 }
 
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: root.relaying ? "This Omaphone only passes messages between the group. You cannot talk or chat while it is hosting." : "Experimental: this Omaphone becomes the group's relay. It cannot talk or chat while hosting."
+                                color: Qt.darker(root.foreground, 1.5)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                                wrapMode: Text.WordWrap
                             }
 
                             Button {
@@ -1744,12 +1883,12 @@ Panel {
 
                                 visible: !root.rotateConfirm
                                 width: parent.width
-                                text: "Rotate onion identity"
+                                text: "Change my calling address"
                                 iconText: "󰑓"
                                 leftAlign: true
                                 bordered: true
                                 enabled: !root.commandBusy && !root.online && !root.inSession
-                                tooltipText: root.online ? "Go offline before rotating identity" : ""
+                                tooltipText: root.online ? "Go offline before changing your calling address" : ""
                                 foreground: root.urgent
                                 accent: root.urgent
                                 fontFamily: root.fontFamily
@@ -1761,7 +1900,7 @@ Panel {
                                 }
                                 onClicked: root.rotateConfirm = true
                                 Accessible.role: Accessible.Button
-                                Accessible.name: "Rotate onion identity"
+                                Accessible.name: "Change my calling address"
                                 Accessible.description: "Existing invites will stop working"
                                 Accessible.onPressAction: root.rotateConfirm = true
                             }
@@ -1786,7 +1925,7 @@ Panel {
 
                                     Text {
                                         width: parent.width
-                                        text: "Rotate identity? Existing invites will stop reaching this phone. This cannot be undone."
+                                        text: "Change your calling address? Existing invites will stop reaching this phone. This cannot be undone."
                                         color: root.foreground
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.bodySmall
@@ -1814,7 +1953,7 @@ Panel {
                                             }
                                             onClicked: root.rotateConfirm = false
                                             Accessible.role: Accessible.Button
-                                            Accessible.name: "Cancel identity rotation"
+                                            Accessible.name: "Cancel address change"
                                             Accessible.onPressAction: root.rotateConfirm = false
                                         }
 
@@ -1822,7 +1961,7 @@ Panel {
                                             id: rotateNowButton
 
                                             width: (parent.width - parent.spacing) / 2
-                                            text: "Rotate now"
+                                            text: "Change address"
                                             bordered: true
                                             enabled: !root.commandBusy && !root.online
                                             foreground: root.urgent
@@ -1836,7 +1975,7 @@ Panel {
                                             }
                                             onClicked: root.rotateIdentity()
                                             Accessible.role: Accessible.Button
-                                            Accessible.name: "Confirm identity rotation"
+                                            Accessible.name: "Confirm calling address change"
                                             Accessible.onPressAction: root.rotateIdentity()
                                         }
 

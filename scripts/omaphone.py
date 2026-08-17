@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA_VERSION = 1
-BACKEND_VERSION = "1.0.0"
+BACKEND_VERSION = "1.1.0"
 UPSTREAM_COMMIT = "67c8167dae167276b1ba69ac66b79b3abedceef8"
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/edengilbertus/terminalphone/"
@@ -56,6 +56,7 @@ MAX_TEXT_BYTES = 4_096
 MAX_MESSAGE_CHARS = 2_048
 MAX_MESSAGES = 50
 MAX_LINE_CHARS = 8_192
+MAX_ROOM_SIZE = 10_000
 MAX_LOG_BYTES = 256 * 1024
 MAX_PTY_WRITE_QUEUE_BYTES = 64 * 1024
 PTT_INTERVAL_MIN = 0.100
@@ -532,6 +533,8 @@ def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]
         "remoteAddress": "",
         "localTalking": False,
         "remoteTalking": False,
+        "groupCall": False,
+        "roomSize": 0,
         "messages": [],
         "settings": dict(DEFAULT_SETTINGS if settings is None else settings),
         "lastError": "",
@@ -661,7 +664,9 @@ def _parse_terminal_line(line: str) -> list[OutputEvent]:
     if onion_match:
         events.append(OutputEvent("onion", onion_match.group(1).lower()))
     connected_match = re.fullmatch(r"CALL CONNECTED(?:\s+([a-z2-7]{56}\.onion))?", stripped, re.I)
-    if connected_match:
+    if " ".join(stripped.split()) == "CALL CONNECTED RELAY (group)":
+        events.append(OutputEvent("connected_group"))
+    elif connected_match:
         events.append(OutputEvent("connected", (connected_match.group(1) or "").lower()))
     elif re.fullmatch(r"Incoming call detected!", stripped):
         events.append(OutputEvent("connected"))
@@ -685,6 +690,18 @@ def _parse_terminal_line(line: str) -> list[OutputEvent]:
         events.append(OutputEvent("remote_talking", "true"))
     if re.search(r"(?:^|\s)Remote:\s*Idle(?:\s|$)", line, re.I):
         events.append(OutputEvent("remote_talking", "false"))
+    # Both displays are updated in place, so several updates can be
+    # concatenated in the PTY byte stream without a newline. Only the newest
+    # complete, tightly-shaped counter on this display line is authoritative.
+    room_matches = [
+        *re.finditer(r"(?:^|\s)Group:\s*([0-9]{1,5})\s+callers\b", line),
+        *re.finditer(r"(?:^|\s)Callers:\s*([0-9]{1,5})(?=\s|$)", line),
+    ]
+    if room_matches:
+        newest = max(room_matches, key=lambda match: match.start())
+        room_size = int(newest.group(1))
+        if room_size <= MAX_ROOM_SIZE:
+            events.append(OutputEvent("room_size", str(room_size)))
     failure = re.fullmatch(r"\s*\[FAIL\]\s*(.*)", line, re.I)
     if failure:
         events.append(OutputEvent("error", _safe_event_text(failure.group(1)) or "TerminalPhone failed"))
@@ -705,6 +722,7 @@ class OutputStreamParser:
         self.cleaner = AnsiCleaner()
         self.partial = ""
         self.emitted: set[OutputEvent] = set()
+        self.mutable_values: dict[str, str] = {}
 
     def feed(self, data: bytes) -> tuple[str, list[OutputEvent]]:
         cleaned = self.cleaner.feed(data)
@@ -717,12 +735,18 @@ class OutputStreamParser:
             # it before looking for any control-looking text in the payload.
             parsed = [] if _is_chat_line(self.partial) and not complete_line else parse_terminal_output(self.partial)
             for event in parsed:
-                if event not in self.emitted:
+                if event.kind == "room_size":
+                    if self.mutable_values.get(event.kind) == event.value:
+                        continue
+                    self.mutable_values[event.kind] = event.value
+                    events.append(event)
+                elif event not in self.emitted:
                     self.emitted.add(event)
                     events.append(event)
             if complete_line:
                 self.partial = ""
                 self.emitted.clear()
+                self.mutable_values.clear()
         return cleaned, events
 
 
@@ -892,6 +916,20 @@ class Supervisor:
         self.status["busy"] = self.status["phase"] in {"starting", "calling", "testing", "relay"}
         self.status["localTalking"] = bool(self.status.get("localTalking") and self.invocation)
         self.status["remoteTalking"] = bool(self.status.get("remoteTalking") and self.invocation)
+        self.status["groupCall"] = bool(self.status.get("groupCall") and self.invocation)
+        room_size = self.status.get("roomSize", 0)
+        room_context = bool(
+            self.invocation
+            and (self.status["groupCall"] or self.invocation.kind == "relay")
+        )
+        self.status["roomSize"] = (
+            room_size
+            if isinstance(room_size, int)
+            and not isinstance(room_size, bool)
+            and 0 <= room_size <= MAX_ROOM_SIZE
+            and room_context
+            else 0
+        )
         if self.status["phase"] not in PHASES:
             self.status["phase"] = "error"
         atomic_json(self.paths.status_file, self.status)
@@ -982,6 +1020,10 @@ class Supervisor:
         self.ptt_next = 0.0
         self.ptt_deadline = 0.0
 
+    def _clear_room(self) -> None:
+        self.status["groupCall"] = False
+        self.status["roomSize"] = 0
+
     def _start_invocation(self, kind: str, address: str = "") -> None:
         if self.invocation is not None:
             raise OmaphoneError("TerminalPhone is already running")
@@ -1019,6 +1061,7 @@ class Supervisor:
         self.stop_deadline = 0.0
         self.pending_text = None
         self._clear_ptt()
+        self._clear_room()
         self.status["lastError"] = ""
         self.status["phase"] = {
             "listen": "starting",
@@ -1035,6 +1078,7 @@ class Supervisor:
         self.pending_invocation = pending
         self.stop_reason = reason
         self._clear_ptt()
+        self._clear_room()
         if self.invocation is not None:
             # Q works in raw call mode and, with newline, in cooked listen/relay prompts.
             self._write_pty(b"Q\n")
@@ -1117,24 +1161,40 @@ class Supervisor:
         elif event.kind == "onion":
             self.status["onion"] = event.value
         elif event.kind == "listening":
+            self._clear_room()
             self.status["phase"] = "listening"
             invocation.connected_once = False
             self.listener_failures = 0
             self.listener_retry_at = 0.0
         elif event.kind == "connected":
+            self._clear_room()
             self.status["phase"] = "connected"
             invocation.connected_once = True
             if event.value:
                 self.status["remoteAddress"] = event.value
+        elif event.kind == "connected_group":
+            self.status["groupCall"] = True
+            self.status["roomSize"] = 0
+            self.status["phase"] = "connected"
+            invocation.connected_once = True
         elif event.kind == "testing":
+            self._clear_room()
             self.status["phase"] = "testing"
         elif event.kind == "relay":
+            self._clear_room()
             self.status["phase"] = "relay"
         elif event.kind == "call_ended":
             self._clear_ptt()
+            self._clear_room()
             self.status["phase"] = "starting" if desired_online(self.paths) else "offline"
         elif event.kind == "remote_talking":
             self.status["remoteTalking"] = event.value == "true"
+        elif event.kind == "room_size":
+            if invocation.kind == "relay" or self.status.get("groupCall"):
+                if re.fullmatch(r"[0-9]{1,5}", event.value):
+                    room_size = int(event.value)
+                    if room_size <= MAX_ROOM_SIZE:
+                        self.status["roomSize"] = room_size
         elif event.kind == "incoming_message":
             self._append_message("incoming", event.value)
         elif event.kind == "outgoing_message":
@@ -1179,6 +1239,7 @@ class Supervisor:
         self.invocation = None
         self.pending_text = None
         self._clear_ptt()
+        self._clear_room()
         self.status["remoteTalking"] = False
         pending = self.pending_invocation
         self.pending_invocation = None
@@ -1274,6 +1335,7 @@ class Supervisor:
         self.stop_deadline = 0.0
         self.status["localTalking"] = False
         self.status["remoteTalking"] = False
+        self._clear_room()
         self.status["phase"] = (
             "starting"
             if desired_online(self.paths)

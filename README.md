@@ -1,47 +1,39 @@
 # Omaphone
 
-Omaphone turns [TerminalPhone](https://github.com/edengilbertus/terminalphone)
-into a small, native Omarchy 4 phone widget. The normal surface is deliberately
-simple: go online, share or paste an invite, call, hold to talk, send a message,
-and hang up. Tor, the onion service, audio conversion, encryption commands,
-process supervision, and TerminalPhone's terminal controls stay behind the
-panel.
+![Omaphone on a riced Omarchy 4 desktop](preview.png)
 
-It is a push-to-talk phone, not a conventional live audio call. A voice note is
-recorded while the talk control is held and sent when it is released—the model
-TerminalPhone uses to tolerate Tor latency.
+**A private walkie-talkie in your Omarchy bar. Hold to record. Release to
+send. Tor carries it.**
 
-## What the widget includes
+Omaphone turns
+[TerminalPhone](https://github.com/edengilbertus/terminalphone) into a small,
+native Omarchy 4 widget. Open it from the bar, call a friend, hold the big talk
+button, and let go when you are done. You can also send text messages or host
+an experimental group room.
 
-- One-click first-time setup with a bundled, checksum-verified TerminalPhone
-  backend pinned to an exact revision.
-- Online/listening, outgoing calls, incoming calls, hangup, and automatic
-  return to listening.
-- A large hold-to-talk control with local and remote speaking state.
-- Encrypted in-call text messages and a compact conversation history.
-- Opaque invite codes that carry the onion address and room configuration.
-- Audio test, quality, voice effect, chime, Snowflake, HMAC, relay, and onion
-  identity rotation controls behind an advanced section.
-- A theme-aware Omarchy panel, keyboard navigation, IPC actions, and state
-  polling without launching a visible terminal.
+It feels like a call, but the audio is intentionally not live. Omaphone records
+one short voice message while you hold the button, then encrypts and sends it
+when you release. That simple rhythm works well over Tor and makes taking turns
+feel natural.
 
-## Requirements
+## What you get
 
-- Omarchy 4.x and its `omarchy-shell`/Quickshell bar.
-- Python 3 (used only for the local supervisor).
-- TerminalPhone's Arch packages: `tor`, `opus-tools`, `sox`, `socat`,
-  `openssl`, `alsa-utils`, and `libpulse`.
-- The AUR package `snowflake-pt-client` when the optional Snowflake transport
-  is enabled.
+- Private, direct voice calls carried through Tor onion services.
+- One big hold-to-record button, with clear local and remote activity.
+- Encrypted text chat alongside every call.
+- Simple invites: copy yours, or paste one from someone you trust.
+- An experimental group-room host for small push-to-talk conversations.
+- First-run setup, audio testing, call quality, voice effects, and chimes.
+- Optional connection and authentication controls tucked into **Advanced**.
+- A theme-aware Omarchy panel with keyboard navigation and no terminal window
+  to manage.
 
-The widget's **Install requirements** action uses PolicyKit to ask for the
-package-manager authorization that a shell plugin cannot safely request in its
-background process. It never embeds or bypasses an administrator password.
-The optional Snowflake client is not in Arch's official repositories, so
-Omaphone does not silently build it as root. Install and review it separately
-with `omarchy pkg aur add snowflake-pt-client` before enabling Snowflake.
+Underneath the friendly panel, Omaphone runs one pinned copy of TerminalPhone.
+TerminalPhone still owns the Tor connection, audio, encryption, and wire
+protocol; Omaphone handles setup, lifecycle, safe state, and the desktop
+experience. See [Architecture](docs/ARCHITECTURE.md) for the full design.
 
-## Install locally
+## Install
 
 From a committed checkout of this repository:
 
@@ -50,46 +42,122 @@ omarchy plugin validate .
 omarchy plugin add "$PWD" --enable --yes
 ```
 
-Omarchy clones the repository into `~/.config/omarchy/plugins/omaphone.phone`
-and places the widget on the right side of the bar. For a published copy,
-replace `"$PWD"` with its trusted Git URL.
+Or install the published repository directly:
 
-Open the phone icon and choose **Set up Omaphone**. If dependencies are
-missing, choose **Install requirements**, then go online. The first Tor
-bootstrap may take a minute or two; the onion identity becomes available when
-it finishes.
+```bash
+omarchy plugin add https://github.com/tomdavenport/omaphone.git --enable --yes
+```
 
-To remove it:
+Omarchy clones the plugin into
+`~/.config/omarchy/plugins/omaphone.phone` and adds the phone to the right side
+of the bar.
+
+Open the phone and choose **Set up Omaphone**. If it says a few tools are
+missing, choose **Install missing tools**, then go online. Tor may take a minute
+or two to connect for the first time. Your private address appears when it is
+ready.
+
+To remove Omaphone cleanly:
 
 ```bash
 omarchy-shell omaphone.phone offline
 omarchy plugin remove omaphone.phone
 ```
 
-Go offline before disabling or removing the plugin so its background listener
-is shut down cleanly. Removing the plugin does not silently delete its onion
-keys, room secret, or message state. Omaphone keeps those under the standard
-per-user XDG data/state directories so an update or reinstall cannot rotate
-identity by accident.
+Going offline first stops the background listener. Removing the plugin leaves
+your private address, room key, settings, and local messages in your standard
+per-user data folders, so reinstalling does not unexpectedly give you a new
+identity.
 
-## Use
+## Make a private call
 
 1. Choose **Go online** so Omaphone can receive calls.
-2. Copy **My invite** and send it over a channel you already trust, or paste an
-   invite you received.
-3. Choose **Call**. When connected, hold the talk control and release it to
-   send; text chat is available beneath it.
-4. Choose **Hang up** when finished. Omaphone returns to listening when online.
+2. Choose **Copy invite** and send it through a private channel you already
+   trust, or paste an invite that a friend sent you.
+3. Choose **Call**.
+4. Hold the talk button to record. Release it to send. Type below it when text
+   is easier.
+5. Choose **Hang up** when you are finished. If you are online, Omaphone goes
+   back to listening.
 
-An invite is effectively a room key: anyone who obtains it can call and
-decrypt traffic for that room. Treat it like a password, do not publish it,
-and clear it from clipboard history after sharing when that matters to your
-threat model. The bounded local conversation history can be deleted with
-**Advanced → Clear local chat history**.
+An invite is a key to the conversation. Anyone who gets it can call the room
+and decrypt compatible traffic, so treat it like a password: do not post it in
+public, and remove it from clipboard history when that matters. You can delete
+the small local text history from **Advanced**.
 
-## IPC
+Omaphone currently remembers one call key at a time. Using a different invite
+replaces that key, so calls using an earlier invite may stop working. A proper
+multi-contact design is the next step, not something the current panel quietly
+pretends to provide.
 
-The widget exposes the standard Omarchy Shell target `omaphone.phone`:
+## Host a group room (experimental)
+
+TerminalPhone includes an experimental multi-caller relay, and Omaphone makes
+it available as **Host a group**. The host can be an ordinary local machine. You
+do not need a public server, a public IP address, or router port forwarding:
+Tor publishes the room as an onion service.
+
+The trade-off is that the host machine must stay awake, online, and running the
+room. That Omaphone instance becomes a relay only; it cannot talk or chat in
+the room. Join from another machine if the host also wants to take part.
+
+To try it:
+
+1. On the host, open **Advanced** and choose **Host a group**.
+2. Give every participant the same invite through a trusted private channel.
+   They must all use its shared room key and settings.
+3. Each participant pairs the invite and calls the host.
+4. Take turns speaking. This is push-to-talk forwarding, not a live audio mix.
+
+Keep rooms small and have one person speak at a time. The upstream design can
+accept multiple callers, but Omaphone labels the feature experimental because
+it does not set a tested capacity or provide moderation, admission controls,
+or speaking queues.
+
+There is one important hosting caveat in the currently pinned TerminalPhone:
+its `socat` listener does not explicitly bind to loopback, so the listening
+port may also be reachable on the host's LAN interfaces. No router forwarding
+is needed, but the host should use a firewall to block non-loopback access to
+that port. The default is TCP `7777`. Read the room's metadata and trust limits
+in [Security](docs/SECURITY.md#group-room-hosting) before inviting people.
+
+## Requirements
+
+- Omarchy 4.x with the `omarchy-shell`/Quickshell bar.
+- Python 3, used only by Omaphone's local supervisor.
+- TerminalPhone's Arch packages: `tor`, `opus-tools`, `sox`, `socat`,
+  `openssl`, `alsa-utils`, and `libpulse`.
+- The AUR package `snowflake-pt-client` only if you turn on the optional
+  Snowflake connection method.
+
+**Install missing tools** uses PolicyKit for package-manager approval. It
+does not store or bypass an administrator password. Omaphone does not silently
+build the optional Snowflake package as root; review and install that package
+separately with:
+
+```bash
+omarchy pkg aur add snowflake-pt-client
+```
+
+## Privacy, in plain English
+
+Omaphone hides networking and cryptography controls; it does not make their
+trade-offs disappear. The room key is kept in a user-only file so Omaphone can
+listen in the background without asking for a passphrase after every restart.
+Recent text messages are also local plaintext with user-only permissions. Disk
+encryption and a locked session still matter.
+
+TerminalPhone has not been independently audited as part of this project.
+Omaphone preserves its implementation instead of inventing a second
+cryptographic protocol. Read [Security](docs/SECURITY.md) before relying on it
+for a high-risk conversation.
+
+Omaphone does not ship an address book yet. The privacy-safe design we plan to
+use is documented in [Contacts roadmap](docs/CONTACTS.md).
+
+## Command-line controls
+
+The widget exposes the Omarchy Shell target `omaphone.phone`:
 
 ```bash
 omarchy-shell omaphone.phone open
@@ -99,28 +167,10 @@ omarchy-shell omaphone.phone offline
 omarchy-shell omaphone.phone hangup
 ```
 
-## Security notes
-
-Omaphone intentionally leaves TerminalPhone's network, Tor, audio, and crypto
-implementation untouched. It drives the pinned interactive program through an
-isolated pseudo-terminal and verifies the bundled source before copying or
-executing it.
-That preserves wire compatibility and avoids creating a second crypto
-implementation.
-
-This does not make TerminalPhone independently audited. It uses a pre-shared
-room secret and exposes several expert security/performance switches whose
-trade-offs still apply. Omaphone stores the room secret in a user-only file
-(`0600`) because unattended listening cannot stop for a passphrase prompt.
-Its bounded chat history is also local plaintext state with user-only
-permissions. Disk encryption and a locked user session remain part of the
-local security boundary. See [docs/SECURITY.md](docs/SECURITY.md) before using
-it for a high-risk situation.
-
 ## Development
 
-The backend has no third-party Python dependencies. Run the non-desktop test
-suite and plugin validator with:
+The Omaphone supervisor has no third-party Python dependencies. Run the
+non-desktop checks with:
 
 ```bash
 python3 -m unittest discover -s tests -v
@@ -128,8 +178,9 @@ python3 -m py_compile scripts/*.py
 omarchy plugin validate .
 ```
 
-No test needs Tor, a microphone, root, a compositor, or control of the host
-desktop.
+These checks do not need Tor, a microphone, root access, a compositor, or
+control of the host desktop.
 
-The implementation is MIT licensed. TerminalPhone's separate attribution and
-pinned revision are recorded in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+Omaphone is MIT licensed. TerminalPhone's separate license, pinned revision,
+and checksum are recorded in
+[Third-party notices](THIRD_PARTY_NOTICES.md).

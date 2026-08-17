@@ -1,0 +1,106 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="1280"
+     height="640"
+     viewBox="0 0 1280 640"
+     role="img"
+     aria-labelledby="title description">
+  <title id="title">Omaphone GitHub social preview</title>
+  <desc id="description">A real Omarchy 4 desktop screenshot with the Omaphone panel open, plus four concise product features.</desc>
+
+  <defs>
+    <linearGradient id="reading-mask" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#080A0D" stop-opacity="0.98"/>
+      <stop offset="0.33" stop-color="#080A0D" stop-opacity="0.90"/>
+      <stop offset="0.51" stop-color="#080A0D" stop-opacity="0.42"/>
+      <stop offset="0.66" stop-color="#080A0D" stop-opacity="0.07"/>
+      <stop offset="0.74" stop-color="#080A0D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#080A0D" stop-opacity="0"/>
+    </linearGradient>
+    <linearGradient id="floor-mask" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0.60" stop-color="#080A0D" stop-opacity="0"/>
+      <stop offset="1" stop-color="#080A0D" stop-opacity="0.35"/>
+    </linearGradient>
+    <filter id="soft-shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="2" stdDeviation="7" flood-color="#000000" flood-opacity="0.38"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="640" fill="#0A0C10"/>
+  <image x="0" y="0" width="1280" height="640"
+         xlink:href="omaphone-screenshot.png"
+         preserveAspectRatio="xMidYMin slice"/>
+  <rect width="1280" height="640" fill="url(#reading-mask)"/>
+  <rect width="1280" height="640" fill="url(#floor-mask)"/>
+
+  <g transform="translate(64 54)" filter="url(#soft-shadow)">
+    <circle cx="7" cy="7" r="7" fill="#B8F46B"/>
+    <circle cx="7" cy="7" r="2.5" fill="#17200E"/>
+    <text x="25" y="13"
+          fill="#E7EAEF"
+          font-family="JetBrainsMono Nerd Font, JetBrains Mono, Noto Sans Mono, monospace"
+          font-size="16"
+          font-weight="700"
+          letter-spacing="2.2">OMARCHY 4  /  TERMINALPHONE</text>
+  </g>
+
+  <g transform="translate(62 150)" filter="url(#soft-shadow)">
+    <text x="0" y="0"
+          fill="#FFFFFF"
+          font-family="JetBrainsMono Nerd Font, JetBrains Mono, Noto Sans Mono, monospace"
+          font-size="76"
+          font-weight="700"
+          letter-spacing="-4">OMAPHONE</text>
+    <text x="3" y="49"
+          fill="#F1F3F5"
+          font-family="Noto Sans, Liberation Sans, sans-serif"
+          font-size="26"
+          font-weight="600">A private walkie-talkie in your bar.</text>
+    <text x="3" y="84"
+          fill="#B9BFC8"
+          font-family="Noto Sans, Liberation Sans, sans-serif"
+          font-size="18"
+          font-weight="500">Hold to record. Release to send. Tor carries it.</text>
+  </g>
+
+  <g transform="translate(68 344)"
+     fill="#F4F6F8"
+     font-family="JetBrainsMono Nerd Font, JetBrains Mono, Noto Sans Mono, monospace"
+     font-size="18"
+     font-weight="700"
+     letter-spacing="0.5"
+     filter="url(#soft-shadow)">
+    <circle cx="6" cy="-6" r="4" fill="#B8F46B"/>
+    <text x="24" y="0">PRIVATE CALLS OVER TOR</text>
+
+    <circle cx="6" cy="38" r="4" fill="#B8F46B"/>
+    <text x="24" y="44">HOLD, TALK, RELEASE</text>
+
+    <circle cx="6" cy="82" r="4" fill="#B8F46B"/>
+    <text x="24" y="88">ENCRYPTED TEXT CHAT</text>
+
+    <circle cx="6" cy="126" r="4" fill="#B8F46B"/>
+    <text x="24" y="132">HOST A SMALL GROUP</text>
+    <rect x="266" y="108" width="132" height="30" rx="15"
+          fill="#B8F46B" fill-opacity="0.14"
+          stroke="#B8F46B" stroke-opacity="0.76" stroke-width="1.2"/>
+    <text x="281" y="129"
+          fill="#D9FFAA"
+          font-size="12"
+          font-weight="700"
+          letter-spacing="0.8">EXPERIMENTAL</text>
+  </g>
+
+  <g transform="translate(64 590)" filter="url(#soft-shadow)">
+    <rect x="0" y="-16" width="3" height="20" rx="1.5" fill="#B8F46B"/>
+    <text x="14" y="0"
+          fill="#CFD4DB"
+          font-family="Noto Sans, Liberation Sans, sans-serif"
+          font-size="14"
+          font-weight="600">Native bar widget · one simple panel · no terminal to babysit</text>
+  </g>
+
+  <rect x="1" y="1" width="1278" height="638" fill="none"
+        stroke="#FFFFFF" stroke-opacity="0.10" stroke-width="2"/>
+</svg>
