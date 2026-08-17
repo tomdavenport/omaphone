@@ -61,14 +61,17 @@ Update an installed copy with:
 
 ```bash
 omarchy-shell omaphone.phone offline
-omarchy plugin update omaphone.phone
+omarchy plugin update omaphone.phone --yes
 ```
 
-Omarchy validates the update and reloads the plugin automatically. Very early
-local-checkout installs made before the public repository may not share its
-Git history. If Omarchy refuses that one update even though the checkout is
-clean, remove it with the command below and run the published install command
-again; Omaphone's private state is kept.
+The `--yes` flag skips the long change preview in the terminal. Without it,
+press `q` when you have finished reading that preview; the update is waiting,
+not stuck. Omarchy validates the update and reloads the plugin automatically.
+
+Very early local-checkout installs made before the public repository may not
+share its Git history. If Omarchy refuses that one update even though the
+checkout is clean, remove it with the command below and run the published
+install command again; Omaphone's private state is kept.
 
 To remove Omaphone cleanly:
 
@@ -156,16 +159,29 @@ in [Security](docs/SECURITY.md#group-room-hosting) before inviting people.
 - Python 3, used only by Omaphone's local supervisor.
 - TerminalPhone's Arch packages: `tor`, `opus-tools`, `sox`, `socat`,
   `openssl`, `alsa-utils`, and `libpulse`.
-- The AUR package `snowflake-pt-client` only if you turn on the optional
+- The AUR package `snowflake-pt-client-bin` only if you turn on the optional
   Snowflake connection method.
 
 **Install missing tools** uses PolicyKit for package-manager approval. It
-does not store or bypass an administrator password. Omaphone does not silently
-build the optional Snowflake package as root; review and install that package
-separately with:
+does not store or bypass an administrator password. Normal Tor calls and group
+rooms do not need Snowflake. It is only an alternative way to reach Tor on a
+network that blocks it.
+
+Omaphone does not silently build optional AUR software. If you need Snowflake,
+review the AUR package and its build instructions, then install the compatible
+package yourself:
 
 ```bash
-omarchy pkg aur add snowflake-pt-client
+omarchy pkg aur add snowflake-pt-client-bin
+```
+
+The `-bin` package matters: it provides the `snowflake-client` command that
+TerminalPhone expects. If Snowflake was already turned on but that command is
+missing, choose **Use normal Tor** in Omaphone. You can also recover from a
+terminal without changing your private address, call key, or messages:
+
+```bash
+omarchy-shell omaphone.phone setConfig snowflake false
 ```
 
 ## Privacy, in plain English

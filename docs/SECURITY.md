@@ -46,7 +46,9 @@ operational assumptions of TerminalPhone or Tor.
 - **HMAC** authenticates protocol messages with the room secret and should
   normally remain enabled for Omaphone peers. Both ends must agree.
 - **Snowflake** is a censorship-circumvention transport, not an extra content
-  encryption layer.
+  encryption layer. Normal Tor calls and group rooms do not need it. If you
+  enable it, you must separately review and install an AUR package, adding
+  that package to the software you trust.
 - **Single-hop** (used for specialized relay operation upstream) trades server
   anonymity for latency and should not be treated as a harmless performance
   switch.

@@ -198,6 +198,24 @@ class ReleaseContractTests(unittest.TestCase):
         manifest = json.loads((REPOSITORY_ROOT / "manifest.json").read_text("utf-8"))
         self.assertEqual(manifest["version"], omaphone.BACKEND_VERSION)
 
+    def test_snowflake_package_and_recovery_commands_match_the_binary_contract(self) -> None:
+        self.assertEqual(omaphone.SNOWFLAKE_BINARY, "snowflake-client")
+        self.assertEqual(omaphone.SNOWFLAKE_AUR_PACKAGE, "snowflake-pt-client-bin")
+
+        documentation = "\n".join(
+            path.read_text("utf-8")
+            for path in (REPOSITORY_ROOT / "README.md", *(REPOSITORY_ROOT / "docs").glob("*.md"))
+        )
+        self.assertIn(
+            "omarchy pkg aur add snowflake-pt-client-bin",
+            documentation,
+        )
+        self.assertIn(
+            "omarchy-shell omaphone.phone setConfig snowflake false",
+            documentation,
+        )
+        self.assertNotRegex(documentation, r"\bsnowflake-pt-client(?!-bin)\b")
+
 
 class PinnedAssetTests(TemporaryPathsTestCase):
     BUNDLED_ASSETS = (
@@ -463,6 +481,32 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
         self.assertNotIn("secret", status_value)
         self.assertTrue(status_value["configured"])
 
+    def test_initial_status_reports_missing_snowflake_without_blocking_normal_tor(self) -> None:
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        omaphone.save_app_config(
+            self.paths,
+            {
+                "settings": {**omaphone.DEFAULT_SETTINGS, "snowflake": True},
+                "peerAddress": "",
+            },
+        )
+
+        with (
+            mock.patch.object(omaphone, "backend_installed", return_value=True),
+            mock.patch.object(
+                omaphone,
+                "dependency_status",
+                return_value=[omaphone.SNOWFLAKE_BINARY],
+            ),
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+        ):
+            status_value = omaphone.build_initial_status(self.paths)
+
+        self.assertTrue(status_value["configured"])
+        self.assertTrue(status_value["dependenciesReady"])
+        self.assertEqual(status_value["missingDependencies"], ["snowflake-client"])
+        self.assertFalse(status_value["snowflakeAvailable"])
+
 
 class OnionValidationTests(TemporaryPathsTestCase):
     def test_normalize_accepts_only_v3_base32_host_with_optional_http_scheme(self) -> None:
@@ -627,6 +671,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
         second = omaphone.status_defaults()
         self.assertEqual(first["settings"], omaphone.DEFAULT_SETTINGS)
         self.assertIs(first["relayReady"], False)
+        self.assertIs(first["snowflakeAvailable"], False)
         self.assertNotIn("secret", first)
         first["settings"]["hmac"] = not first["settings"]["hmac"]
         self.assertEqual(second["settings"], omaphone.DEFAULT_SETTINGS)
@@ -1111,6 +1156,99 @@ class SupervisorContractTests(TemporaryPathsTestCase):
 
         supervisor._quiesce_listener.assert_not_called()
         load_config.assert_not_called()
+
+    def test_enabling_missing_snowflake_fails_before_quiesce_or_save(self) -> None:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("listen")
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "listening",
+            "configured": True,
+            "dependenciesReady": True,
+            "online": True,
+        }
+        supervisor._persist = mock.Mock()
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+
+        with (
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+            mock.patch.object(omaphone, "load_app_config") as load_config,
+            mock.patch.object(omaphone, "save_app_config") as save_config,
+        ):
+            response = supervisor.dispatch(
+                {"command": "config", "key": "snowflake", "value": True}
+            )
+
+        self.assertFalse(response["ok"])
+        self.assertIn("normal Tor", response["error"])
+        self.assertIn("snowflake-pt-client-bin", response["error"])
+        supervisor._quiesce_listener.assert_not_called()
+        load_config.assert_not_called()
+        save_config.assert_not_called()
+
+    def test_disabling_missing_snowflake_saves_and_restarts_the_listener(self) -> None:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = self.invocation("listen")
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "listening",
+            "configured": True,
+            "dependenciesReady": True,
+            "online": True,
+        }
+        supervisor._persist = mock.Mock()
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+        supervisor._start_invocation = mock.Mock()
+        current_config = {
+            "settings": {**omaphone.DEFAULT_SETTINGS, "snowflake": True},
+            "peerAddress": VALID_ONION,
+        }
+
+        with (
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+            mock.patch.object(omaphone, "load_app_config", return_value=current_config),
+            mock.patch.object(omaphone, "save_app_config") as save_config,
+        ):
+            response = supervisor.dispatch(
+                {"command": "config", "key": "snowflake", "value": False}
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertFalse(save_config.call_args.args[1]["settings"]["snowflake"])
+        supervisor._quiesce_listener.assert_called_once_with()
+        supervisor._start_invocation.assert_called_once_with("listen")
+
+    def test_enabling_snowflake_succeeds_when_the_expected_binary_is_available(self) -> None:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.invocation = None
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "phase": "offline",
+            "configured": True,
+            "dependenciesReady": True,
+        }
+        supervisor._persist = mock.Mock()
+        supervisor._quiesce_listener = mock.Mock(return_value=False)
+        current_config = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": "",
+        }
+
+        with (
+            mock.patch.object(omaphone, "snowflake_available", return_value=True),
+            mock.patch.object(omaphone, "load_app_config", return_value=current_config),
+            mock.patch.object(omaphone, "save_app_config") as save_config,
+        ):
+            response = supervisor.dispatch(
+                {"command": "config", "key": "snowflake", "value": True}
+            )
+
+        self.assertTrue(response["ok"])
+        self.assertTrue(save_config.call_args.args[1]["settings"]["snowflake"])
+        supervisor._quiesce_listener.assert_called_once_with()
 
     def test_pair_immediately_updates_remote_address_in_returned_status(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
@@ -1766,6 +1904,14 @@ class DependencyTests(unittest.TestCase):
             ],
         )
 
+    def test_missing_optional_snowflake_does_not_block_core_readiness(self) -> None:
+        settings = {**omaphone.DEFAULT_SETTINGS, "snowflake": True}
+        which = self.which_with(*self.BASE_COMMANDS, "parec", "pacat")
+
+        self.assertEqual(omaphone.dependency_status(settings, which), ["snowflake-client"])
+        self.assertEqual(omaphone.required_dependency_status(settings, which), [])
+        self.assertFalse(omaphone.snowflake_available(which))
+
     def test_arch_install_command_is_fixed_and_non_shell(self) -> None:
         which = self.which_with("pacman", "pkexec")
         expected = [
@@ -1825,7 +1971,7 @@ class DependencyTests(unittest.TestCase):
         command.assert_not_called()
         run.assert_not_called()
 
-    def test_install_dependencies_uses_current_snowflake_setting_and_gives_aur_guidance(self) -> None:
+    def test_install_dependencies_installs_only_core_tools_when_snowflake_is_missing(self) -> None:
         settings = {**omaphone.DEFAULT_SETTINGS, "snowflake": True}
         completed = mock.Mock(returncode=0)
         command_value = ["pkexec", "pacman", "tor"]
@@ -1834,37 +1980,31 @@ class DependencyTests(unittest.TestCase):
                 omaphone,
                 "dependency_status",
                 side_effect=(["tor", "snowflake-client"], ["snowflake-client"]),
-            ) as status,
+            ),
             mock.patch.object(omaphone, "arch_install_command", return_value=command_value) as command,
             mock.patch.object(omaphone.subprocess, "run", return_value=completed) as run,
         ):
-            with self.assertRaisesRegex(omaphone.OmaphoneError, "snowflake-pt-client") as raised:
-                omaphone.install_dependencies(settings)
+            omaphone.install_dependencies(settings)
 
-        self.assertEqual(status.call_args_list, [mock.call(settings), mock.call(settings)])
         command.assert_called_once_with()
         run.assert_called_once_with(
             command_value, check=False, stdout=omaphone.subprocess.DEVNULL
         )
-        self.assertIn("omarchy pkg aur add snowflake-pt-client", str(raised.exception))
-        self.assertNotIn("snowflake-pt-client", command_value)
+        self.assertNotIn(omaphone.SNOWFLAKE_AUR_PACKAGE, command_value)
 
-    def test_snowflake_only_missing_skips_pacman_and_gives_aur_guidance(self) -> None:
+    def test_snowflake_only_missing_is_a_noop_and_never_invokes_aur(self) -> None:
         settings = {**omaphone.DEFAULT_SETTINGS, "snowflake": True}
         with (
             mock.patch.object(
                 omaphone,
                 "dependency_status",
-                side_effect=(["snowflake-client"], ["snowflake-client"]),
-            ) as status,
+                return_value=["snowflake-client"],
+            ),
             mock.patch.object(omaphone, "arch_install_command") as command,
             mock.patch.object(omaphone.subprocess, "run") as run,
         ):
-            with self.assertRaisesRegex(omaphone.OmaphoneError, "snowflake-pt-client") as raised:
-                omaphone.install_dependencies(settings)
+            omaphone.install_dependencies(settings)
 
-        self.assertEqual(status.call_args_list, [mock.call(settings), mock.call(settings)])
-        self.assertIn("omarchy pkg aur add snowflake-pt-client", str(raised.exception))
         command.assert_not_called()
         run.assert_not_called()
 

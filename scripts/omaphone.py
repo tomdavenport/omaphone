@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA_VERSION = 1
-BACKEND_VERSION = "1.1.1"
+BACKEND_VERSION = "1.1.2"
 UPSTREAM_COMMIT = "67c8167dae167276b1ba69ac66b79b3abedceef8"
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/edengilbertus/terminalphone/"
@@ -93,6 +93,8 @@ BOOL_CONFIG_KEYS = {"snowflake", "hmac"}
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 INVITE_PREFIX = "omaphone:v1:"
+SNOWFLAKE_BINARY = "snowflake-client"
+SNOWFLAKE_AUR_PACKAGE = "snowflake-pt-client-bin"
 
 
 class OmaphoneError(Exception):
@@ -511,15 +513,28 @@ def parse_invite(code: str) -> Invite:
     return Invite(secret, address, hmac_enabled)
 
 
+def snowflake_available(which: Callable[[str], str | None] | None = None) -> bool:
+    resolver = shutil.which if which is None else which
+    return bool(resolver(SNOWFLAKE_BINARY))
+
+
 def dependency_status(settings: Mapping[str, Any], which: Callable[[str], str | None] = shutil.which) -> list[str]:
     missing = [name for name in ("tor", "opusenc", "opusdec", "sox", "socat", "openssl") if not which(name)]
     pulse_ready = bool(which("parec") and which("pacat"))
     alsa_ready = bool(which("arecord") and which("aplay"))
     if not pulse_ready and not alsa_ready:
         missing.append("parec+pacat or arecord+aplay")
-    if settings.get("snowflake") and not which("snowflake-client"):
-        missing.append("snowflake-client")
+    if settings.get("snowflake") and not snowflake_available(which):
+        missing.append(SNOWFLAKE_BINARY)
     return missing
+
+
+def required_dependency_status(
+    settings: Mapping[str, Any], which: Callable[[str], str | None] | None = None
+) -> list[str]:
+    """Return only dependencies required for Omaphone's standard Tor mode."""
+    missing = dependency_status(settings) if which is None else dependency_status(settings, which)
+    return [name for name in missing if name != SNOWFLAKE_BINARY]
 
 
 def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]:
@@ -531,6 +546,7 @@ def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]
         "backendInstalled": False,
         "dependenciesReady": False,
         "missingDependencies": [],
+        "snowflakeAvailable": False,
         "online": False,
         "busy": False,
         "onion": "",
@@ -778,6 +794,7 @@ def build_initial_status(paths: Paths) -> dict[str, Any]:
     installed = backend_installed(paths)
     secret = read_secret(paths)
     missing = dependency_status(config["settings"])
+    required_missing = [name for name in missing if name != SNOWFLAKE_BINARY]
     configured = bool(installed and secret)
     prior = read_json(paths.status_file, {})
     prior_messages = prior.get("messages", []) if isinstance(prior, dict) else []
@@ -788,8 +805,9 @@ def build_initial_status(paths: Paths) -> dict[str, Any]:
             "phase": "offline" if configured else "unconfigured",
             "configured": configured,
             "backendInstalled": installed,
-            "dependenciesReady": not missing,
+            "dependenciesReady": not required_missing,
             "missingDependencies": missing,
+            "snowflakeAvailable": snowflake_available(),
             "online": desired_online(paths),
             "onion": read_onion(paths),
             "remoteAddress": config["peerAddress"],
@@ -837,21 +855,16 @@ def arch_install_command(
 def install_dependencies(settings: Mapping[str, Any] | None = None) -> None:
     selected_settings = DEFAULT_SETTINGS if settings is None else settings
     missing = dependency_status(selected_settings)
-    if not missing:
+    required_missing = [name for name in missing if name != SNOWFLAKE_BINARY]
+    if not required_missing:
         return
-    if any(name != "snowflake-client" for name in missing):
-        command = arch_install_command()
-        # stdout is reserved for the single JSON response consumed by Service.qml.
-        # PolicyKit and pacman diagnostics remain on stderr for terminal callers.
-        result = subprocess.run(command, check=False, stdout=subprocess.DEVNULL)
-        if result.returncode:
-            raise OmaphoneError(f"dependency installation failed with exit code {result.returncode}")
-    remaining = dependency_status(selected_settings)
-    if remaining == ["snowflake-client"]:
-        raise OmaphoneError(
-            "Snowflake needs the reviewed AUR package snowflake-pt-client; "
-            "run omarchy pkg aur add snowflake-pt-client, then retry"
-        )
+    command = arch_install_command()
+    # stdout is reserved for the single JSON response consumed by Service.qml.
+    # PolicyKit and pacman diagnostics remain on stderr for terminal callers.
+    result = subprocess.run(command, check=False, stdout=subprocess.DEVNULL)
+    if result.returncode:
+        raise OmaphoneError(f"dependency installation failed with exit code {result.returncode}")
+    remaining = required_dependency_status(selected_settings)
     if remaining:
         raise OmaphoneError("dependencies are still missing after installation: " + ", ".join(remaining))
 
@@ -900,13 +913,15 @@ class Supervisor:
         config = load_app_config(self.paths)
         installed = backend_installed(self.paths)
         missing = dependency_status(config["settings"])
+        required_missing = [name for name in missing if name != SNOWFLAKE_BINARY]
         configured = bool(installed and read_secret(self.paths))
         self.status.update(
             {
                 "configured": configured,
                 "backendInstalled": installed,
-                "dependenciesReady": not missing,
+                "dependenciesReady": not required_missing,
                 "missingDependencies": missing,
+                "snowflakeAvailable": snowflake_available(),
                 "online": desired_online(self.paths),
                 "settings": config["settings"],
                 "onion": read_onion(self.paths) or self.status.get("onion", ""),
@@ -1051,7 +1066,16 @@ class Supervisor:
         if not self.status["configured"]:
             raise OmaphoneError("run setup before starting TerminalPhone")
         if not self.status["dependenciesReady"]:
-            raise OmaphoneError("missing dependencies: " + ", ".join(self.status["missingDependencies"]))
+            missing = [
+                name for name in self.status["missingDependencies"] if name != SNOWFLAKE_BINARY
+            ]
+            raise OmaphoneError("missing dependencies: " + ", ".join(missing))
+        if self.status["settings"].get("snowflake") and not self.status["snowflakeAvailable"]:
+            raise OmaphoneError(
+                "Snowflake is turned on, but its client is not installed. "
+                "Turn Snowflake off to use normal Tor, or install "
+                f"{SNOWFLAKE_AUR_PACKAGE} from the AUR."
+            )
         arguments = {
             "listen": ["listen"],
             # argv[2] only gets past upstream dispatch; call_remote still ignores it and prompts.
@@ -1467,7 +1491,7 @@ class Supervisor:
                 save_app_config(self.paths, config)
                 self.status["phase"] = "offline"
                 self.status["lastError"] = ""
-                if desired_online(self.paths) and not dependency_status(config["settings"]):
+                if desired_online(self.paths) and not required_dependency_status(config["settings"]):
                     self._start_invocation("listen")
                 return self._response()
             if command == "online":
@@ -1558,6 +1582,11 @@ class Supervisor:
                 if not isinstance(key, str):
                     raise OmaphoneError("invalid config key")
                 value = validate_config_value(key, request.get("value"))
+                if key == "snowflake" and value and not snowflake_available():
+                    raise OmaphoneError(
+                        "Snowflake is not installed. Keep using normal Tor, or install "
+                        f"{SNOWFLAKE_AUR_PACKAGE} from the AUR first."
+                    )
                 config = load_app_config(self.paths)
                 config["settings"][key] = value
                 restart = self._quiesce_listener()

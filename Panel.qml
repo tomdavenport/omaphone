@@ -20,6 +20,7 @@ Panel {
         "backendInstalled": false,
         "dependenciesReady": false,
         "missingDependencies": [],
+        "snowflakeAvailable": false,
         "online": false,
         "busy": false,
         "onion": "",
@@ -65,12 +66,18 @@ Panel {
     readonly property int roomSize: typeof phoneStatus.roomSize === "number" && isFinite(phoneStatus.roomSize) ? Math.max(0, Math.min(10000, Math.floor(phoneStatus.roomSize))) : 0
     readonly property bool relayReady: phoneStatus.relayReady === true
     readonly property bool inSession: connected || calling || relaying
-    readonly property bool ready: configured && backendInstalled && dependenciesReady
     readonly property bool pttHeld: pttPointerHeld || pttKeyboardHeld || pttAccessibleHeld
     readonly property bool actionBusy: phoneService ? phoneService.actionBusy : true
     readonly property bool commandBusy: phoneService ? phoneService.commandBusy : true
     readonly property bool clipboardBusy: phoneService ? phoneService.clipboardBusy : false
     readonly property var missingDependencies: Array.isArray(phoneStatus.missingDependencies) ? phoneStatus.missingDependencies : []
+    readonly property bool onlyOptionalSnowflakeMissing: missingDependencies.length === 1 && String(missingDependencies[0]) === "snowflake-client"
+    readonly property bool snowflakeAvailable: phoneStatus.snowflakeAvailable === true
+    readonly property bool snowflakeEnabled: settingBool("snowflake", false)
+    readonly property bool snowflakeBlocked: snowflakeEnabled && !snowflakeAvailable
+    // Keep the normal phone visible for users updating from a backend that
+    // reported the optional Snowflake client as a required dependency.
+    readonly property bool ready: configured && backendInstalled && (dependenciesReady || onlyOptionalSnowflakeMissing)
     readonly property var visibleMessages: Array.isArray(phoneStatus.messages) ? phoneStatus.messages.slice(Math.max(0, phoneStatus.messages.length - 6)) : []
     readonly property bool editorActive: dialField.activeFocus || pairField.activeFocus || messageField.activeFocus
     readonly property bool dropdownActive: qualityDropdown.popupOpen || voiceDropdown.popupOpen || chimeDropdown.popupOpen
@@ -86,7 +93,11 @@ Panel {
             return actions;
         }
         if (root.advancedOpen && !root.inSession) {
-            actions.push("advanced", "quality", "chime", "voice", "snowflake", "hmac", "audio");
+            actions.push("advanced", "quality", "chime", "voice");
+            if (root.snowflakeAvailable || root.snowflakeEnabled)
+                actions.push("snowflake");
+
+            actions.push("hmac", "audio");
             if (root.visibleMessages.length > 0)
                 actions.push("clear-chat");
 
@@ -98,6 +109,9 @@ Panel {
             }
             return actions;
         }
+        if (root.snowflakeBlocked && !root.inSession)
+            actions.push("normal-tor");
+
         if (root.connected) {
             actions.push("ptt", "send", "hangup");
         } else if (root.calling) {
@@ -108,7 +122,9 @@ Panel {
 
             actions.push("hangup");
         } else {
-            actions.push("online");
+            if (!root.snowflakeBlocked || root.online)
+                actions.push("online");
+
             if (root.phase !== "starting") {
                 if (root.online)
                     actions.push("call");
@@ -405,6 +421,19 @@ Panel {
 
     }
 
+    function useNormalTor() {
+        if (phoneService)
+            phoneService.setConfig("snowflake", "false");
+
+    }
+
+    function toggleSnowflake() {
+        if (!snowflakeEnabled && !snowflakeAvailable)
+            return ;
+
+        toggleConfig("snowflake", snowflakeEnabled);
+    }
+
     function runAudioTest() {
         if (phoneService)
             phoneService.runAudioTest();
@@ -608,6 +637,9 @@ Panel {
         if (action === "install")
             return installButton;
 
+        if (action === "normal-tor")
+            return normalTorButton;
+
         if (action === "online")
             return onlineButton;
 
@@ -707,6 +739,8 @@ Panel {
             setup();
         } else if (action === "install") {
             installDependencies();
+        } else if (action === "normal-tor") {
+            useNormalTor();
         } else if (action === "online") {
             toggleOnline();
         } else if (action === "call") {
@@ -751,7 +785,7 @@ Panel {
         else if (action === "voice")
             voiceDropdown.open();
         else if (action === "snowflake")
-            toggleConfig("snowflake", snowflakeToggle.checked);
+            toggleSnowflake();
         else if (action === "hmac")
             toggleConfig("hmac", hmacToggle.checked);
         else if (action === "audio")
@@ -1107,6 +1141,73 @@ Panel {
                         width: parent.width
                         spacing: Style.space(10)
 
+                        CursorSurface {
+                            id: snowflakeRecoveryCard
+
+                            visible: root.snowflakeBlocked && !root.inSession && !root.advancedOpen
+                            width: parent.width
+                            implicitHeight: snowflakeRecoveryColumn.implicitHeight + Style.space(18)
+                            current: true
+                            foreground: root.accent
+                            accent: root.accent
+
+                            Column {
+                                id: snowflakeRecoveryColumn
+
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                anchors.leftMargin: Style.space(10)
+                                anchors.rightMargin: Style.space(10)
+                                spacing: Style.space(7)
+
+                                Text {
+                                    width: parent.width
+                                    text: "Snowflake is optional. Normal Tor works without it."
+                                    color: root.foreground
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.body
+                                    font.bold: true
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Text {
+                                    width: parent.width
+                                    text: "The optional Snowflake client is not installed. Switch it off to keep using Omaphone."
+                                    color: Qt.darker(root.foreground, 1.35)
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.bodySmall
+                                    wrapMode: Text.WordWrap
+                                }
+
+                                Button {
+                                    id: normalTorButton
+
+                                    width: parent.width
+                                    text: root.commandBusy ? "Switching…" : "Use normal Tor"
+                                    iconText: "󰖩"
+                                    bordered: true
+                                    enabled: !root.commandBusy && !root.inSession
+                                    foreground: root.foreground
+                                    accent: root.accent
+                                    fontFamily: root.fontFamily
+                                    hasCursor: root.actionHasCursor("normal-tor")
+                                    onHovered: function(hovered) {
+                                        if (hovered)
+                                            root.selectAction("normal-tor");
+
+                                    }
+                                    onClicked: root.useNormalTor()
+                                    Accessible.role: Accessible.Button
+                                    Accessible.name: "Use normal Tor"
+                                    Accessible.description: "Turn off the unavailable optional Snowflake transport and keep using Omaphone"
+                                    Accessible.onPressAction: root.useNormalTor()
+                                }
+
+                            }
+
+                        }
+
                         Button {
                             id: onlineButton
 
@@ -1115,7 +1216,7 @@ Panel {
                             text: root.phase === "starting" ? "Going online…" : (root.online ? "Go offline" : "Go online")
                             iconText: root.online ? "󰖪" : "󰖩"
                             bordered: true
-                            enabled: !root.commandBusy && root.phase !== "starting"
+                            enabled: !root.commandBusy && root.phase !== "starting" && (!root.snowflakeBlocked || root.online)
                             foreground: root.foreground
                             accent: root.accent
                             fontFamily: root.fontFamily
@@ -1128,6 +1229,7 @@ Panel {
                             onClicked: root.toggleOnline()
                             Accessible.role: Accessible.Button
                             Accessible.name: text
+                            Accessible.description: root.snowflakeBlocked && !root.online ? "Switch back to normal Tor before going online" : ""
                             Accessible.onPressAction: root.toggleOnline()
                         }
 
@@ -2016,10 +2118,10 @@ Panel {
                                 id: snowflakeToggle
 
                                 width: parent.width
-                                label: "Help Tor connect"
-                                description: "Use Snowflake when Tor is blocked on this network."
+                                label: "Snowflake for blocked networks"
+                                description: root.snowflakeEnabled && !root.snowflakeAvailable ? "The optional Snowflake client is missing. Turn this off to use normal Tor." : "Use only when this network blocks normal Tor. Requires the optional Snowflake package, installed separately so you can review it."
                                 checked: root.settingBool("snowflake", false)
-                                enabled: !root.commandBusy && !root.inSession
+                                enabled: !root.commandBusy && !root.inSession && (root.snowflakeAvailable || root.snowflakeEnabled)
                                 foreground: root.foreground
                                 accent: root.accent
                                 fontFamily: root.fontFamily
@@ -2029,13 +2131,13 @@ Panel {
                                         root.selectAction("snowflake");
 
                                 }
-                                onClicked: root.toggleConfig("snowflake", checked)
+                                onClicked: root.toggleSnowflake()
                                 Accessible.role: Accessible.CheckBox
                                 Accessible.name: label
                                 Accessible.description: description
                                 Accessible.checked: checked
-                                Accessible.focusable: true
-                                Accessible.onPressAction: root.toggleConfig("snowflake", checked)
+                                Accessible.focusable: enabled
+                                Accessible.onPressAction: root.toggleSnowflake()
                             }
 
                             Toggle {

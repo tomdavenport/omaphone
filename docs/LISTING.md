@@ -140,4 +140,5 @@ Recommended exports:
   interfaces. Hosts should firewall the listen port from LAN/WAN access.
 - Omarchy plugins run as the logged-in user and are not sandboxed. Users should
   review the source before installing.
-- Optional Snowflake support needs a separately reviewed AUR package.
+- Optional Snowflake support requires the user to review and install the
+  `snowflake-pt-client-bin` AUR package; normal Tor calls do not need it.

@@ -20,6 +20,7 @@ Item {
         "backendInstalled": false,
         "dependenciesReady": false,
         "missingDependencies": [],
+        "snowflakeAvailable": false,
         "online": false,
         "busy": false,
         "onion": "",
@@ -45,7 +46,14 @@ Item {
     readonly property bool configured: phoneStatus.configured === true
     readonly property bool backendInstalled: phoneStatus.backendInstalled === true
     readonly property bool dependenciesReady: phoneStatus.dependenciesReady === true
-    readonly property bool ready: configured && backendInstalled && dependenciesReady
+    readonly property var missingDependencies: Array.isArray(phoneStatus.missingDependencies) ? phoneStatus.missingDependencies : []
+    readonly property bool onlyOptionalSnowflakeMissing: missingDependencies.length === 1 && String(missingDependencies[0]) === "snowflake-client"
+    readonly property bool snowflakeAvailable: phoneStatus.snowflakeAvailable === true
+    readonly property bool snowflakeEnabled: phoneStatus.settings && typeof phoneStatus.settings === "object" && phoneStatus.settings.snowflake === true
+    readonly property bool snowflakeBlocked: snowflakeEnabled && !snowflakeAvailable
+    // Older backends counted Snowflake as a required dependency. Keep the
+    // phone usable long enough to switch that optional transport back off.
+    readonly property bool ready: configured && backendInstalled && (dependenciesReady || onlyOptionalSnowflakeMissing)
     readonly property bool onlineState: phoneStatus.online === true
     readonly property bool connected: phase === "connected"
     readonly property bool actionBusy: actionProcess.running || actionProcess.exitSeen || actionProcess.startPending || inviteProcess.running || inviteProcess.startPending
@@ -99,6 +107,7 @@ Item {
             "missingDependencies": Array.isArray(parsed.missingDependencies) ? parsed.missingDependencies.map(function(item) {
                 return String(item);
             }) : [],
+            "snowflakeAvailable": parsed.snowflakeAvailable === true,
             "online": parsed.online === true,
             "busy": parsed.busy === true,
             "onion": String(parsed.onion || ""),
@@ -249,14 +258,14 @@ Item {
     }
 
     function goOnline() {
-        if (!ready || onlineState || commandBusy)
+        if (!ready || snowflakeBlocked || onlineState || commandBusy)
             return false;
 
         return runAction(["online"], "", "online");
     }
 
     function goOffline() {
-        if (!ready || !onlineState || commandBusy)
+        if (!onlineState || commandBusy)
             return false;
 
         requestPtt(false);
