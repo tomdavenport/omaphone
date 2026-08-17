@@ -37,9 +37,13 @@ The supervisor socket and lifecycle lock use `XDG_RUNTIME_DIR`, falling back to
 the user's `/run/user/<uid>` directory and finally a UID-namespaced temporary
 directory. Durable backend, onion identity, and room configuration use XDG
 data. A hosted room's separate secret lives only in the supervisor invocation.
-Derived status and bounded message history use XDG state. Every Omaphone
-directory is checked for user ownership and set to mode `0700`; the socket,
-current call secret, lock, and other private files use mode `0600`.
+Derived status and bounded message history use XDG state. The app configuration
+also stores one validated paired address and a preferred caller/listener role.
+TerminalPhone keeps one stable onion identity and one global shared secret in
+its private profile; Omaphone 1.2 does not create a separate number or key per
+person. Every Omaphone directory is checked for user ownership and set to mode
+`0700`; the socket, current call secret, lock, and other private files use mode
+`0600`.
 
 The UI never invokes TerminalPhone's `status` command. It reads only the
 supervisor's atomic JSON snapshot.
@@ -54,6 +58,16 @@ supervisor's atomic JSON snapshot.
 - A normally completed call, test, or relay returns to listening when the user
   remains online. An unexpected listener failure is surfaced and retried with
   bounded exponential backoff instead of a rapid restart loop.
+- Adding a phone validates the complete private contact card, requires its
+  address, and rejects this computer's own address before stopping a listener
+  or changing the saved profile. Only then does it commit the new peer, room
+  settings, role, and secret and start the outgoing call.
+- An outgoing call has two separate guards: the 60-second peer wait starts only
+  once TerminalPhone actually begins dialing, while a 360-second overall guard
+  also bounds Tor bootstrap and every earlier stage.
+- A failed or timed-out call records one bounded, user-facing outcome. That
+  outcome survives the automatic return to listening so the panel can show it;
+  a deliberate hangup is not reported as a connection failure.
 - Push-to-talk is a renewable eight-second lease. If the shell or UI dies
   during recording, the supervisor stops transmission when the lease expires.
 - If the bundled upstream fails its pinned checksum, Omaphone refuses to copy
@@ -71,3 +85,14 @@ The pin currently targets GitHub commit
 advertise TerminalPhone 1.1.7, their scripts differ. Omaphone deliberately uses
 the pinned GitHub source, which includes the later PipeWire/PulseAudio path,
 and does not follow the GitLab URL embedded in upstream installation examples.
+
+TerminalPhone does not expose a telephone ringing/answer state. Its listener
+waits for a connection and the caller dials it; connection and chime output are
+feedback, not evidence that a remote person is seeing an Answer prompt.
+
+The same compatibility boundary prevents a secure multi-contact address book:
+the pinned listener accepts one global shared secret. A future one-device-number
+experience with named contacts needs invisible per-contact keys and protocol
+support to select them. Merely storing several names beside the legacy global
+key would not isolate those relationships; separate TerminalPhone identities
+remain a possible advanced privacy mode, not the everyday contact model.

@@ -10,7 +10,8 @@ operational assumptions of TerminalPhone or Tor.
 - The bundled script is verified by SHA-256 before it is copied or executed.
 - Room secrets are never passed in process arguments, written to logs, or
   returned by the regular status endpoint.
-- Message text and pair/invite input cross the short-lived CLI over stdin.
+- Message text and private contact-card input cross the short-lived CLI over
+  stdin.
 - Runtime control is a user-only local socket, and durable private files use
   restrictive permissions.
 - Only one TerminalPhone process may own a profile at a time.
@@ -19,15 +20,17 @@ operational assumptions of TerminalPhone or Tor.
 
 - Omarchy shell plugins execute unsandboxed as the logged-in user. Review this
   repository and its pinned upstream before enabling it.
-- An Omaphone invite contains the onion address and shared room secret. Anyone
-  with the invite can attempt to join that room and decrypt compatible
-  traffic. Send it through an authenticated, confidential channel.
-- Clipboard managers may retain an invite after copying it. Remove sensitive
-  entries when necessary.
-- The current call secret is stored unencrypted on disk with mode `0600` so
-  background listening can restart without a passphrase. A hosted room uses a
-  separate secret held in the host backend's memory for that relay session;
-  participants store it when they use the invite. Full-disk encryption
+- An Omaphone private contact card contains the device's stable onion address
+  and TerminalPhone's global shared secret. It is not a unique number or key
+  for one named person. Anyone with the card can attempt to connect and decrypt
+  compatible traffic. Send it through an authenticated, confidential channel.
+  The same handling warning applies to an experimental room invite.
+- Clipboard managers may retain a contact card or room invite after copying
+  it. Remove sensitive entries when necessary.
+- The global direct-call secret is stored unencrypted on disk with mode `0600`
+  so background listening can restart without a passphrase. A hosted room uses
+  a separate secret held in the host backend's memory for that relay session;
+  participants store it when they use the room invite. Full-disk encryption
   protects a powered-off machine; a compromised or unlocked user account does
   not.
 - The recent in-widget text history is stored as bounded local plaintext state
@@ -35,9 +38,15 @@ operational assumptions of TerminalPhone or Tor.
   Another process running as the same user can read it. Use **Advanced → Clear
   local chat history** if local message retention is inappropriate for the
   device.
-- Contact identity is possession of an invite/shared secret, not a public-key
-  identity ceremony. Confirm an invite through a second channel for sensitive
-  use.
+- Contact identity is possession of a private contact card/shared secret, not
+  a public-key identity ceremony. Confirm the card through a second channel
+  for sensitive use. Sharing one device's normal card with several people gives
+  them the same legacy global key; Omaphone 1.2 does not claim they are isolated
+  contacts.
+- Omaphone 1.2 saves one paired phone and one active global key, not separate
+  per-contact profiles. Adding another private contact card or joining a room
+  replaces that pairing. Re-add the direct phone's card after a room if you
+  want to restore it.
 - Tor hides network location under its own threat model; it does not make a
   compromised endpoint, microphone, operating system, or room peer safe.
 
@@ -67,6 +76,10 @@ decrypt voice or text. Every participant uses the same invite and therefore
 the same room secret; any participant with that secret can decrypt room
 content and may be able to impersonate another participant. There is no
 separate member identity, moderator, ban list, or admission service.
+
+On each participant, using the room invite replaces the one remembered paired
+phone and active key. A room invite is not saved beside a direct-phone profile,
+because multi-profile contacts are not implemented yet.
 
 Hosting does not need a public IP, router port forwarding, or a separate
 internet server because Tor publishes the relay's onion service. The host

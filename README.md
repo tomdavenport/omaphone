@@ -21,7 +21,7 @@ feel natural.
 - Private, direct voice calls carried through Tor onion services.
 - One big hold-to-record button, with clear local and remote activity.
 - Encrypted text chat alongside every call.
-- Simple invites: copy yours, or paste one from someone you trust.
+- Simple private contact cards: share yours, or add one from someone you trust.
 - An experimental group-room host for small push-to-talk conversations.
 - First-run setup, audio testing, call quality, voice effects, and chimes.
 - Optional connection and authentication controls tucked into **Advanced**.
@@ -53,9 +53,9 @@ Omarchy clones the plugin into
 of the bar.
 
 Open the phone and choose **Set up Omaphone**. If it says a few tools are
-missing, choose **Install missing tools**, then go online. Tor may take a minute
-or two to connect for the first time. Your private address appears when it is
-ready.
+missing, choose **Install missing tools**. After that, the two first-call
+buttons handle the Tor setup for you. Creating a private route can take a
+minute or two the first time.
 
 Update an installed copy with:
 
@@ -85,26 +85,48 @@ your private address, room key, settings, and local messages in your standard
 per-user data folders, so reinstalling does not unexpectedly give you a new
 identity.
 
-## Make a private call
+## Make your first private call
 
-1. Choose **Go online** so Omaphone can receive calls.
-2. Choose **Copy invite** and send it through a private channel you already
-   trust, or paste an invite that a friend sent you.
-3. Choose **Call**.
-4. Hold the talk button to record. Release it to send. Type below it when text
-   is easier.
-5. Choose **Hang up** when you are finished. If you are online, Omaphone goes
-   back to listening.
+Decide which computer will wait and which will connect:
 
-An invite is a key to the conversation. Anyone who gets it can call you
-and decrypt compatible traffic, so treat it like a password: do not post it in
-public, and remove it from clipboard history when that matters. You can delete
-the small local text history from **Advanced**.
+1. **Receiver:** choose **Share my phone**, send the copied private contact
+   card through a trusted channel, and leave Omaphone waiting.
+2. **Caller:** choose **Add a phone**, paste the private contact card, then
+   choose **Add & connect**.
 
-Omaphone currently remembers one call key at a time. Using a different invite
-replaces that key, so calls using an earlier invite may stop working. A proper
-multi-contact design is the next step, not something the current panel quietly
+That is the whole connection flow. You do not need to copy an onion address,
+go online separately, or press a second Call button. Omaphone prepares Tor,
+remembers the paired phone, and starts the call.
+
+There is no telephone-style ringing or separate answer phase in the underlying
+TerminalPhone protocol. The receiver waits while the caller opens the route;
+both sides move to the conversation when it is ready. Do not wait for a ring
+or an Answer button. Sounds are connection and push-to-talk feedback, not a
+ringtone.
+
+Once connected, hold the talk button to record and release it to send. Type
+below it when text is easier, then choose **Hang up** when you are finished.
+Next time, the receiver can wait again and the caller can choose **Call paired
+phone**.
+
+The private contact card contains both the receiver's address and the key to
+the conversation; it does not expire after use. Anyone who gets it can attempt
+to call and decrypt compatible traffic, so treat it like a password: do not
+post it in public, and remove it from clipboard history when that matters. You
+can delete the small local text history from **Advanced**.
+
+Under the current TerminalPhone backend, this installation has one stable
+`.onion` device address and one global direct-call secret. A private contact
+card does not create a different number or cryptographic key for each person.
+The connecting side saves one **Paired phone**. Adding a different card
+replaces that saved phone and the active global secret, so the earlier card
+must be added again before that conversation will work. A proper multi-contact
+design needs separate, invisible per-contact keys; it is not something 1.2
 pretends to provide.
+
+The normal guided flow deliberately hides raw `.onion` addresses. Manual
+address calling remains under **Advanced** for troubleshooting and
+TerminalPhone interoperability.
 
 ## Host a group room (experimental)
 
@@ -123,12 +145,15 @@ disk. Participants save the room key as their current call key when they use
 the invite, so they should still treat it like a password. A clipboard manager
 may retain a copied room invite after the room stops.
 
-To join a room:
+To join a room, choose **Add a phone**, paste the host's room invite, then
+choose **Add & connect**. There is no separate online or call step; the relay
+identifies the connection as a group call. Although it uses the same private
+code field, a room invite is a shared room capability, not a phone contact.
 
-1. Choose **Use an invite** and paste the invite from the host.
-2. Choose **Go online**.
-3. Choose **Call**. There is no separate join mode: the relay identifies the
-   connection as a group call.
+A room invite uses the same one-pair slot as a direct call. Joining a room
+therefore replaces the paired phone and call key remembered on that device.
+After the room, add the direct phone's private contact card again to restore
+that pairing.
 
 To host a room:
 
@@ -137,7 +162,7 @@ To host a room:
 2. Wait for **Room is ready**, then choose **Copy room invite**.
 3. Send that same invite to every participant through a trusted private
    channel.
-4. Keep the host awake. Everyone else follows the three joining steps above.
+4. Keep the host awake. Everyone else follows the joining step above.
 
 Take turns speaking. This is push-to-talk forwarding, not a live audio mix.
 
@@ -199,8 +224,10 @@ Omaphone preserves its implementation instead of inventing a second
 cryptographic protocol. Read [Security](docs/SECURITY.md) before relying on it
 for a high-risk conversation.
 
-Omaphone does not ship an address book yet. The privacy-safe design we plan to
-use is documented in [Contacts roadmap](docs/CONTACTS.md).
+Omaphone does not ship an address book yet. The planned model keeps one stable
+device number, adds local names, and gives each relationship its own invisible
+cryptographic key. The legacy backend cannot get there by sharing its one
+global key with a list of names. See the [Contacts roadmap](docs/CONTACTS.md).
 
 The larger product direction—People, Private Drops, video Postcards, a
 self-hosted answering machine, and the honest boundary around live video—is in

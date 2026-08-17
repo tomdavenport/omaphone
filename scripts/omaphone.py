@@ -33,7 +33,7 @@ from typing import Any, Callable, Mapping
 
 
 SCHEMA_VERSION = 1
-BACKEND_VERSION = "1.1.2"
+BACKEND_VERSION = "1.2.0"
 UPSTREAM_COMMIT = "67c8167dae167276b1ba69ac66b79b3abedceef8"
 UPSTREAM_URL = (
     "https://raw.githubusercontent.com/edengilbertus/terminalphone/"
@@ -67,6 +67,12 @@ LISTENER_RETRY_MAX_SECONDS = 30.0
 OFFLINE_IDLE_SECONDS = 60.0
 CHILD_GRACEFUL_EXIT_SECONDS = 1.0
 CHILD_TERM_EXIT_SECONDS = 3.0
+CALL_DIAL_TIMEOUT_SECONDS = 60.0
+CALL_SETUP_TIMEOUT_SECONDS = 360.0
+# Kept as a descriptive alias for callers/tests referring to the overall guard.
+CALL_OVERALL_TIMEOUT_SECONDS = CALL_SETUP_TIMEOUT_SECONDS
+MAX_CALL_MESSAGE_CHARS = 240
+MAX_OUTCOME_SEQUENCE = (1 << 53) - 1
 
 PHASES = {
     "unconfigured",
@@ -90,11 +96,27 @@ QUALITY_BITRATE = {"low": 12, "balanced": 16, "high": 24}
 VOICE_EFFECTS = {"none", "deep", "high", "robot", "echo", "whisper"}
 CHIMES = {"off", "tone", "double", "chirp", "ding", "click"}
 BOOL_CONFIG_KEYS = {"snowflake", "hmac"}
+PREFERRED_ROLES = {"", "caller", "listener"}
+CALL_STAGES = {"", "preparing", "opening-tor", "dialing"}
+CALL_OUTCOMES = {"", "failed", "timeout"}
 ONION_RE = re.compile(r"^[a-z2-7]{56}\.onion$")
 SECRET_RE = re.compile(r"^[A-Za-z0-9_-]{32,256}$")
 INVITE_PREFIX = "omaphone:v1:"
 SNOWFLAKE_BINARY = "snowflake-client"
 SNOWFLAKE_AUR_PACKAGE = "snowflake-pt-client-bin"
+SELF_CONNECTION_MESSAGE = (
+    "You cannot connect a phone to itself. Use this invite on your other phone."
+)
+CALL_FAILED_MESSAGE = (
+    "Could not connect. Make sure the other phone is listening, then try again."
+)
+CALL_TIMEOUT_MESSAGE = (
+    "The call took too long to connect. Make sure the other phone is listening, then try again."
+)
+CALL_OUTCOME_MESSAGES = {
+    "failed": CALL_FAILED_MESSAGE,
+    "timeout": CALL_TIMEOUT_MESSAGE,
+}
 
 
 class OmaphoneError(Exception):
@@ -418,16 +440,35 @@ def load_app_config(paths: Paths) -> dict[str, Any]:
             except OmaphoneError:
                 pass
     peer = raw.get("peerAddress", "") if isinstance(raw, dict) else ""
-    if peer and not isinstance(peer, str):
+    if not isinstance(peer, str):
         peer = ""
     if peer and not ONION_RE.fullmatch(peer):
         peer = ""
-    return {"settings": settings, "peerAddress": peer}
+    preferred_role = raw.get("preferredRole", "") if isinstance(raw, dict) else ""
+    if not isinstance(preferred_role, str) or preferred_role not in PREFERRED_ROLES:
+        preferred_role = ""
+    return {
+        "settings": settings,
+        "peerAddress": peer,
+        "preferredRole": preferred_role,
+    }
 
 
 def save_app_config(paths: Paths, config: Mapping[str, Any]) -> None:
     atomic_json(paths.app_config, config)
     sync_upstream_config(paths, config["settings"])
+
+
+def effective_preferred_role(
+    config: Mapping[str, Any], *, listening: bool
+) -> str:
+    """Expose a safe role for legacy 1.1 configs without persisting a guess."""
+    role = config.get("preferredRole", "")
+    if isinstance(role, str) and role in {"caller", "listener"}:
+        return role
+    if listening:
+        return "listener"
+    return "caller" if config.get("peerAddress") else ""
 
 
 def sync_upstream_config(paths: Paths, settings: Mapping[str, Any]) -> None:
@@ -457,7 +498,7 @@ def normalize_onion_address(value: str) -> str:
 
 @dataclasses.dataclass(frozen=True)
 class Invite:
-    secret: str
+    secret: str = dataclasses.field(repr=False)
     address: str
     hmac: bool = True
 
@@ -551,6 +592,15 @@ def status_defaults(settings: Mapping[str, Any] | None = None) -> dict[str, Any]
         "busy": False,
         "onion": "",
         "remoteAddress": "",
+        "pairedAddress": "",
+        "hasPeer": False,
+        "selfPeer": False,
+        "preferredRole": "",
+        "callStage": "",
+        "torProgress": 0,
+        "lastCallOutcome": "",
+        "lastCallMessage": "",
+        "callOutcomeSequence": 0,
         "localTalking": False,
         "remoteTalking": False,
         "groupCall": False,
@@ -643,6 +693,18 @@ def _safe_event_text(value: str) -> str:
     return value[:MAX_MESSAGE_CHARS]
 
 
+def _plain_call_message(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    return _safe_event_text(value)[:MAX_CALL_MESSAGE_CHARS]
+
+
+def _bounded_outcome_sequence(value: Any) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return 0
+    return max(0, min(value, MAX_OUTCOME_SEQUENCE))
+
+
 _INCOMING_CHAT_RE = re.compile(r"^\s*\[MSG\]\s?(.*)$", re.I)
 _OUTGOING_CHAT_RE = re.compile(r"^\s*\[you\]\s?(.*)$", re.I)
 
@@ -678,6 +740,26 @@ def _parse_terminal_line(line: str) -> list[OutputEvent]:
         events.append(OutputEvent("continue_prompt"))
     if re.fullmatch(r"MSG>", stripped):
         events.append(OutputEvent("message_prompt"))
+
+    # These controls intentionally match only output emitted by the pinned
+    # TerminalPhone revision. The dialing event never carries the peer address.
+    if re.fullmatch(r"\[INFO\] Starting Tor\.\.\.", stripped):
+        events.append(OutputEvent("tor_start"))
+    bootstrap_match = re.fullmatch(
+        r"Bootstrapped ([0-9]{1,3})%(?: \([^()\r\n]{1,64}\): [^\r\n]{1,512})?",
+        stripped,
+    )
+    if bootstrap_match:
+        progress = int(bootstrap_match.group(1))
+        if 0 <= progress <= 100:
+            events.append(OutputEvent("tor_progress", str(progress)))
+    dialing_match = re.fullmatch(
+        r"Connecting to [a-z2-7]{56}\.onion:([0-9]{1,5}) via Tor\.\.\.",
+        stripped,
+        re.I,
+    )
+    if dialing_match and 1 <= int(dialing_match.group(1)) <= 65_535:
+        events.append(OutputEvent("dialing"))
 
     onion_match = re.fullmatch(
         r"(?:Your address:|Relay address:)\s*([a-z2-7]{56}\.onion)", stripped, re.I
@@ -800,6 +882,13 @@ def build_initial_status(paths: Paths) -> dict[str, Any]:
     prior_messages = prior.get("messages", []) if isinstance(prior, dict) else []
     if isinstance(prior_messages, list):
         status["messages"] = [message for message in prior_messages[-MAX_MESSAGES:] if isinstance(message, dict)]
+    prior_outcome = prior.get("lastCallOutcome", "") if isinstance(prior, dict) else ""
+    if not isinstance(prior_outcome, str) or prior_outcome not in CALL_OUTCOMES:
+        prior_outcome = ""
+    prior_sequence = prior.get("callOutcomeSequence", 0) if isinstance(prior, dict) else 0
+    onion = read_onion(paths)
+    paired_address = config["peerAddress"]
+    online = desired_online(paths)
     status.update(
         {
             "phase": "offline" if configured else "unconfigured",
@@ -808,9 +897,18 @@ def build_initial_status(paths: Paths) -> dict[str, Any]:
             "dependenciesReady": not required_missing,
             "missingDependencies": missing,
             "snowflakeAvailable": snowflake_available(),
-            "online": desired_online(paths),
-            "onion": read_onion(paths),
-            "remoteAddress": config["peerAddress"],
+            "online": online,
+            "onion": onion,
+            "remoteAddress": paired_address,
+            "pairedAddress": paired_address,
+            "hasPeer": bool(paired_address),
+            "selfPeer": bool(paired_address and onion and paired_address == onion),
+            "preferredRole": effective_preferred_role(config, listening=online),
+            "lastCallOutcome": prior_outcome,
+            "lastCallMessage": _plain_call_message(
+                CALL_OUTCOME_MESSAGES.get(prior_outcome, "")
+            ),
+            "callOutcomeSequence": _bounded_outcome_sequence(prior_sequence),
         }
     )
     return status
@@ -876,7 +974,10 @@ class Invocation:
     master_fd: int
     parser: OutputStreamParser
     started_at: float
-    address: str = ""
+    address: str = dataclasses.field(default="", repr=False)
+    dial_started_at: float = 0.0
+    timeout_outcome: str = ""
+    outcome_published: bool = False
     address_sent: bool = False
     relay_confirmed: bool = False
     relay_ready: bool = False
@@ -900,6 +1001,7 @@ class Supervisor:
         self.pending_text: str | None = None
         self.stop_reason = ""
         self.stop_deadline = 0.0
+        self.stop_escalation_stage = 0
         self.ptt_next = 0.0
         self.ptt_deadline = 0.0
         self.listener_failures = 0
@@ -915,6 +1017,16 @@ class Supervisor:
         missing = dependency_status(config["settings"])
         required_missing = [name for name in missing if name != SNOWFLAKE_BINARY]
         configured = bool(installed and read_secret(self.paths))
+        onion = read_onion(self.paths) or self.status.get("onion", "")
+        if not isinstance(onion, str) or not ONION_RE.fullmatch(onion):
+            onion = ""
+        paired_address = config.get("peerAddress", "")
+        online = desired_online(self.paths)
+        listener_running = bool(
+            self.invocation is not None
+            and self.invocation.kind == "listen"
+            and self.status.get("phase") in {"starting", "listening", "connected"}
+        )
         self.status.update(
             {
                 "configured": configured,
@@ -922,9 +1034,17 @@ class Supervisor:
                 "dependenciesReady": not required_missing,
                 "missingDependencies": missing,
                 "snowflakeAvailable": snowflake_available(),
-                "online": desired_online(self.paths),
+                "online": online,
                 "settings": config["settings"],
-                "onion": read_onion(self.paths) or self.status.get("onion", ""),
+                "onion": onion,
+                "pairedAddress": paired_address,
+                "hasPeer": bool(paired_address),
+                "selfPeer": bool(
+                    paired_address and onion and paired_address == onion
+                ),
+                "preferredRole": effective_preferred_role(
+                    config, listening=online or listener_running
+                ),
             }
         )
         if not self.status.get("remoteAddress"):
@@ -962,6 +1082,25 @@ class Supervisor:
         )
         if self.status["phase"] not in PHASES:
             self.status["phase"] = "error"
+        call_stage = self.status.get("callStage", "")
+        self.status["callStage"] = (
+            call_stage if isinstance(call_stage, str) and call_stage in CALL_STAGES else ""
+        )
+        tor_progress = self.status.get("torProgress", 0)
+        if not isinstance(tor_progress, int) or isinstance(tor_progress, bool):
+            tor_progress = 0
+        self.status["torProgress"] = max(0, min(tor_progress, 100))
+        outcome = self.status.get("lastCallOutcome", "")
+        if not isinstance(outcome, str) or outcome not in CALL_OUTCOMES:
+            outcome = ""
+        self.status["lastCallOutcome"] = outcome
+        # Outcome copy is fixed rather than derived from upstream output.
+        self.status["lastCallMessage"] = _plain_call_message(
+            CALL_OUTCOME_MESSAGES.get(outcome, "")
+        )
+        self.status["callOutcomeSequence"] = _bounded_outcome_sequence(
+            self.status.get("callOutcomeSequence", 0)
+        )
         atomic_json(self.paths.status_file, self.status)
 
     def _response(self, **extra: Any) -> dict[str, Any]:
@@ -981,6 +1120,91 @@ class Supervisor:
             {"direction": direction, "text": safe, "timestamp": utc_timestamp()}
         )
         self.status["messages"] = self.status["messages"][-MAX_MESSAGES:]
+
+    def _local_onion(self) -> str:
+        address = read_onion(self.paths)
+        if address:
+            return address
+        candidate = self.status.get("onion", "")
+        return candidate if isinstance(candidate, str) and ONION_RE.fullmatch(candidate) else ""
+
+    def _reject_self_address(self, address: str) -> None:
+        local_address = self._local_onion()
+        if local_address and hmac.compare_digest(address, local_address):
+            raise OmaphoneError(SELF_CONNECTION_MESSAGE)
+
+    def _clear_call_outcome(self) -> None:
+        self.status["lastCallOutcome"] = ""
+        self.status["lastCallMessage"] = ""
+
+    def _publish_call_outcome(self, outcome: str) -> None:
+        if outcome not in {"failed", "timeout"}:
+            return
+        invocation = self.invocation
+        if invocation is not None and invocation.kind == "call" and invocation.outcome_published:
+            return
+        sequence = _bounded_outcome_sequence(self.status.get("callOutcomeSequence", 0))
+        # Sequence zero is reserved for "no outcome has ever been published".
+        self.status["callOutcomeSequence"] = 1 if sequence >= MAX_OUTCOME_SEQUENCE else sequence + 1
+        self.status["lastCallOutcome"] = outcome
+        self.status["lastCallMessage"] = _plain_call_message(CALL_OUTCOME_MESSAGES[outcome])
+        self.status["callStage"] = ""
+        self.status["torProgress"] = 0
+        self.status["lastError"] = CALL_OUTCOME_MESSAGES[outcome]
+        if invocation is not None and invocation.kind == "call":
+            invocation.outcome_published = True
+            if outcome == "timeout":
+                invocation.timeout_outcome = outcome
+
+    def _save_wrapper_config(self, config: Mapping[str, Any]) -> None:
+        """Persist wrapper-only metadata without rewriting live upstream config."""
+        if self.invocation is None:
+            save_app_config(self.paths, config)
+        else:
+            atomic_json(self.paths.app_config, config)
+
+    def _commit_invite_config(
+        self,
+        previous_config: Mapping[str, Any],
+        next_config: Mapping[str, Any],
+        next_secret: str,
+    ) -> None:
+        """Commit the two-file room identity, rolling back synchronous failures."""
+        previous_secret = read_secret(self.paths)
+        try:
+            save_app_config(self.paths, next_config)
+            atomic_write(self.paths.secret_file, next_secret.encode("ascii"))
+        except OSError:
+            # TerminalPhone is quiescent while this runs. Restore both sides of
+            # the room identity before reporting failure; if restoration also
+            # fails, callers still force desired-online false.
+            try:
+                save_app_config(self.paths, previous_config)
+            except OSError:
+                pass
+            try:
+                if previous_secret:
+                    atomic_write(self.paths.secret_file, previous_secret.encode("ascii"))
+                else:
+                    self.paths.secret_file.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+
+    @staticmethod
+    def _signal_child_tree(invocation: Invocation, signal_number: int) -> None:
+        """Signal only a verified child-owned process group, otherwise its PID."""
+        try:
+            process_group = os.getpgid(invocation.pid)
+        except OSError:
+            return
+        try:
+            if process_group == invocation.pid:
+                os.killpg(process_group, signal_number)
+            else:
+                os.kill(invocation.pid, signal_number)
+        except OSError:
+            pass
 
     def _update_pty_interest(self) -> None:
         invocation = self.invocation
@@ -1062,6 +1286,9 @@ class Supervisor:
     def _start_invocation(self, kind: str, address: str = "") -> None:
         if self.invocation is not None:
             raise OmaphoneError("TerminalPhone is already running")
+        if kind == "call":
+            address = normalize_onion_address(address)
+            self._reject_self_address(address)
         self._refresh_static()
         if not self.status["configured"]:
             raise OmaphoneError("run setup before starting TerminalPhone")
@@ -1111,6 +1338,7 @@ class Supervisor:
         self.selector.register(master_fd, selectors.EVENT_READ, "pty")
         self.stop_reason = ""
         self.stop_deadline = 0.0
+        self.stop_escalation_stage = 0
         self.pending_text = None
         self._clear_ptt()
         self._clear_room()
@@ -1123,6 +1351,10 @@ class Supervisor:
             "relay": "relay",
             "rotate": "starting",
         }[kind]
+        if kind == "call":
+            self._clear_call_outcome()
+            self.status["callStage"] = "preparing"
+            self.status["torProgress"] = 0
         if address:
             self.status["remoteAddress"] = address
         self._persist()
@@ -1130,9 +1362,17 @@ class Supervisor:
     def _request_stop(self, reason: str, pending: tuple[str, str] | None = None) -> None:
         self.pending_invocation = pending
         self.stop_reason = reason
+        self.stop_escalation_stage = 0
         self._clear_ptt()
         self._clear_room()
         self._clear_relay_ready()
+        if reason not in {"call-timeout", "transition"} or (
+            self.invocation is not None
+            and self.invocation.kind == "call"
+            and reason != "call-timeout"
+        ):
+            self.status["callStage"] = ""
+            self.status["torProgress"] = 0
         if self.invocation is not None:
             # Q works in raw call mode and, with newline, in cooked listen/relay prompts.
             self._write_pty(b"Q\n")
@@ -1140,8 +1380,20 @@ class Supervisor:
 
     def _transition(self, kind: str, address: str = "") -> None:
         self._clear_relay_ready()
+        if kind == "call":
+            address = normalize_onion_address(address)
+            self._reject_self_address(address)
+            self._clear_call_outcome()
+            self.status["callStage"] = "preparing"
+            self.status["torProgress"] = 0
         if self.invocation is None:
-            self._start_invocation(kind, address)
+            try:
+                self._start_invocation(kind, address)
+            except OmaphoneError:
+                if kind == "call":
+                    self.status["callStage"] = ""
+                    self.status["torProgress"] = 0
+                raise
         else:
             self._request_stop("transition", (kind, address))
             self.status["phase"] = {
@@ -1170,10 +1422,7 @@ class Supervisor:
             self._tick()
             time.sleep(0.02)
         if self.invocation is not None:
-            try:
-                os.kill(self.invocation.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            self._signal_child_tree(self.invocation, signal.SIGKILL)
             kill_deadline = time.monotonic() + 1.0
             while self.invocation is not None and time.monotonic() < kill_deadline:
                 self._tick()
@@ -1215,6 +1464,20 @@ class Supervisor:
                 self.pending_text = None
         elif event.kind == "onion":
             self.status["onion"] = event.value
+        elif event.kind == "tor_start" and invocation.kind == "call":
+            self.status["callStage"] = "opening-tor"
+            self.status["torProgress"] = 0
+        elif event.kind == "tor_progress" and invocation.kind == "call":
+            if re.fullmatch(r"[0-9]{1,3}", event.value):
+                progress = int(event.value)
+                if 0 <= progress <= 100:
+                    self.status["callStage"] = "opening-tor"
+                    self.status["torProgress"] = progress
+        elif event.kind == "dialing" and invocation.kind == "call":
+            self.status["callStage"] = "dialing"
+            self.status["torProgress"] = 100
+            if not invocation.dial_started_at:
+                invocation.dial_started_at = time.monotonic()
         elif event.kind == "listening":
             self._clear_room()
             self._clear_relay_ready()
@@ -1227,14 +1490,38 @@ class Supervisor:
             self._clear_relay_ready()
             self.status["phase"] = "connected"
             invocation.connected_once = True
+            self.status["callStage"] = ""
+            self.status["torProgress"] = 100 if invocation.kind == "call" else 0
+            self._clear_call_outcome()
             if event.value:
                 self.status["remoteAddress"] = event.value
+                # A future authenticated listener display may identify the
+                # caller. Persist it only after the connected control and only
+                # when replacing no peer (or a stale self-pair).
+                if (
+                    invocation.kind == "listen"
+                    and self.status.get("settings", {}).get("hmac") is True
+                    and event.value != self._local_onion()
+                ):
+                    config = load_app_config(self.paths)
+                    peer = config["peerAddress"]
+                    if not peer or peer == self._local_onion():
+                        config["peerAddress"] = event.value
+                        try:
+                            atomic_json(self.paths.app_config, config)
+                        except OSError:
+                            # The connected call remains usable; callback
+                            # metadata can be learned again on a later call.
+                            pass
         elif event.kind == "connected_group":
             self._clear_relay_ready()
             self.status["groupCall"] = True
             self.status["roomSize"] = 0
             self.status["phase"] = "connected"
             invocation.connected_once = True
+            self.status["callStage"] = ""
+            self.status["torProgress"] = 100 if invocation.kind == "call" else 0
+            self._clear_call_outcome()
         elif event.kind == "testing":
             self._clear_room()
             self._clear_relay_ready()
@@ -1296,8 +1583,17 @@ class Supervisor:
         except OSError:
             pass
         kind = invocation.kind
-        deliberate = bool(self.stop_reason)
+        deliberate = bool(getattr(self, "stop_reason", ""))
         exit_code = os.waitstatus_to_exitcode(wait_status)
+        if kind == "call" and not invocation.connected_once:
+            if invocation.timeout_outcome:
+                # The timeout was published when the guard fired.
+                pass
+            elif not deliberate:
+                self._publish_call_outcome("failed")
+            else:
+                self.status["callStage"] = ""
+                self.status["torProgress"] = 0
         invocation.write_buffer.clear()
         self._clear_relay_ready()
         self.invocation = None
@@ -1309,6 +1605,7 @@ class Supervisor:
         self.pending_invocation = None
         self.stop_reason = ""
         self.stop_deadline = 0.0
+        self.stop_escalation_stage = 0
         self.status["onion"] = read_onion(self.paths) or self.status.get("onion", "")
         if pending:
             try:
@@ -1316,6 +1613,16 @@ class Supervisor:
             except OmaphoneError as exc:
                 self.status["phase"] = "error"
                 self.status["lastError"] = str(exc)
+                if pending[0] == "call":
+                    self.status["callStage"] = ""
+                    self.status["torProgress"] = 0
+                    if desired_online(self.paths):
+                        try:
+                            self._start_invocation("listen")
+                        except OmaphoneError:
+                            pass
+                        else:
+                            self.status["lastError"] = str(exc)
         elif desired_online(self.paths):
             if kind == "listen" and not deliberate and not invocation.connected_once:
                 self._schedule_listener_retry(
@@ -1331,7 +1638,7 @@ class Supervisor:
             self.listener_failures = 0
             self.listener_retry_at = 0.0
             self.status["phase"] = "offline" if self.status["configured"] else "unconfigured"
-            if exit_code and not deliberate:
+            if exit_code and not deliberate and kind != "call":
                 self.status["phase"] = "error"
                 self.status["lastError"] = self.status.get("lastError") or f"TerminalPhone exited with status {exit_code}"
         self._persist()
@@ -1373,16 +1680,10 @@ class Supervisor:
         self._flush_pty_writes()
         wait_status = self._wait_for_child(invocation.pid, CHILD_GRACEFUL_EXIT_SECONDS)
         if wait_status is None:
-            try:
-                os.kill(invocation.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+            self._signal_child_tree(invocation, signal.SIGTERM)
             wait_status = self._wait_for_child(invocation.pid, CHILD_TERM_EXIT_SECONDS)
         if wait_status is None:
-            try:
-                os.kill(invocation.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+            self._signal_child_tree(invocation, signal.SIGKILL)
             try:
                 _, wait_status = os.waitpid(invocation.pid, 0)
             except ChildProcessError:
@@ -1399,6 +1700,7 @@ class Supervisor:
         self.invocation = None
         self.pending_text = None
         self.stop_deadline = 0.0
+        self.stop_escalation_stage = 0
         self.status["localTalking"] = False
         self.status["remoteTalking"] = False
         self._clear_room()
@@ -1429,11 +1731,33 @@ class Supervisor:
                     self.status["lastError"] = "push-to-talk stopped because TerminalPhone input was unavailable"
                     self._persist()
         if self.invocation and self.stop_deadline and now >= self.stop_deadline:
-            try:
-                os.kill(self.invocation.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
-            self.stop_deadline = now + 2.0
+            escalation_stage = getattr(self, "stop_escalation_stage", 0)
+            if escalation_stage == 0:
+                self._signal_child_tree(self.invocation, signal.SIGTERM)
+                self.stop_escalation_stage = 1
+                self.stop_deadline = now + 2.0
+            elif escalation_stage == 1:
+                self._signal_child_tree(self.invocation, signal.SIGKILL)
+                self.stop_escalation_stage = 2
+                self.stop_deadline = 0.0
+            else:
+                self.stop_deadline = 0.0
+        invocation = self.invocation
+        if (
+            invocation is not None
+            and invocation.kind == "call"
+            and not invocation.connected_once
+            and not getattr(self, "stop_reason", "")
+        ):
+            dial_timed_out = bool(
+                invocation.dial_started_at
+                and now - invocation.dial_started_at >= CALL_DIAL_TIMEOUT_SECONDS
+            )
+            setup_timed_out = now - invocation.started_at >= CALL_SETUP_TIMEOUT_SECONDS
+            if dial_timed_out or setup_timed_out:
+                self._publish_call_outcome("timeout")
+                self._request_stop("call-timeout")
+                self._persist()
         if self.invocation:
             try:
                 pid, status_value = os.waitpid(self.invocation.pid, os.WNOHANG)
@@ -1495,10 +1819,33 @@ class Supervisor:
                     self._start_invocation("listen")
                 return self._response()
             if command == "online":
-                save_desired_online(self.paths, True)
+                was_online = desired_online(self.paths)
+                config = load_app_config(self.paths)
+                config["preferredRole"] = "listener"
+                try:
+                    self._save_wrapper_config(config)
+                    save_desired_online(self.paths, True)
+                except OSError as exc:
+                    if not was_online:
+                        try:
+                            save_desired_online(self.paths, False)
+                        except OSError:
+                            pass
+                    self.status["phase"] = "error"
+                    raise OmaphoneError(
+                        "Could not save listening mode. This phone was left offline."
+                    ) from exc
                 self.listener_retry_at = 0.0
                 if self.invocation is None:
-                    self._start_invocation("listen")
+                    try:
+                        self._start_invocation("listen")
+                    except OmaphoneError:
+                        if not was_online:
+                            try:
+                                save_desired_online(self.paths, False)
+                            except OSError:
+                                pass
+                        raise
                 return self._response()
             if command == "offline":
                 save_desired_online(self.paths, False)
@@ -1512,16 +1859,35 @@ class Supervisor:
                     self.status["phase"] = "offline" if self.status["configured"] else "unconfigured"
                 return self._response()
             if command == "call":
-                address = normalize_onion_address(str(request.get("address", "")))
+                supplied_address = request.get("address", "")
+                if not isinstance(supplied_address, str):
+                    raise OmaphoneError("invalid phone address")
+                address = normalize_onion_address(supplied_address)
+                self._reject_self_address(address)
                 if self.invocation and self.invocation.kind != "listen":
                     raise OmaphoneError("another TerminalPhone action is already active")
                 config = load_app_config(self.paths)
                 config["peerAddress"] = address
-                if not self.invocation:
-                    save_app_config(self.paths, config)
-                else:
-                    # Peer metadata is wrapper-only; do not touch TerminalPhone config live.
-                    atomic_json(self.paths.app_config, config)
+                config["preferredRole"] = "caller"
+                try:
+                    self._save_wrapper_config(config)
+                except OSError as exc:
+                    raise OmaphoneError("Could not save the other phone. No call was started.") from exc
+                self._transition("call", address)
+                return self._response()
+            if command == "call-peer":
+                if self.invocation and self.invocation.kind != "listen":
+                    raise OmaphoneError("another TerminalPhone action is already active")
+                config = load_app_config(self.paths)
+                address = config["peerAddress"]
+                if not address:
+                    raise OmaphoneError("No other phone is paired yet.")
+                self._reject_self_address(address)
+                config["preferredRole"] = "caller"
+                try:
+                    self._save_wrapper_config(config)
+                except OSError as exc:
+                    raise OmaphoneError("Could not save calling mode. No call was started.") from exc
                 self._transition("call", address)
                 return self._response()
             if command == "ptt":
@@ -1618,14 +1984,21 @@ class Supervisor:
                 if not isinstance(code, str):
                     raise OmaphoneError("invalid Omaphone invite")
                 invite = parse_invite(code)
+                if invite.address:
+                    self._reject_self_address(invite.address)
                 config = load_app_config(self.paths)
+                previous_config = {
+                    "settings": dict(config["settings"]),
+                    "peerAddress": config["peerAddress"],
+                    "preferredRole": config.get("preferredRole", ""),
+                }
                 config["peerAddress"] = invite.address
                 config["settings"]["hmac"] = invite.hmac
+                config["preferredRole"] = "caller"
                 restart = self._quiesce_listener()
                 # No live reader exists: commit room settings and secret before publishing status.
                 try:
-                    save_app_config(self.paths, config)
-                    atomic_write(self.paths.secret_file, invite.secret.encode("ascii"))
+                    self._commit_invite_config(previous_config, config, invite.secret)
                 except OSError as exc:
                     # Do not restart with a partially committed room identity.
                     try:
@@ -1645,6 +2018,77 @@ class Supervisor:
                         self.status["lastError"] = str(exc)
                 else:
                     self.status["phase"] = "offline"
+                    self.status["lastError"] = ""
+                return self._response()
+            if command == "join":
+                code = request.get("invite")
+                if not isinstance(code, str):
+                    raise OmaphoneError("invalid Omaphone invite")
+                invite = parse_invite(code)
+                if not invite.address:
+                    raise OmaphoneError(
+                        "That invite has no phone address. Create a fresh invite on the other phone."
+                    )
+                self._reject_self_address(invite.address)
+                if self.invocation and self.invocation.kind != "listen":
+                    raise OmaphoneError("finish the active call or test before connecting")
+                config = load_app_config(self.paths)
+                previous_config = {
+                    "settings": dict(config["settings"]),
+                    "peerAddress": config["peerAddress"],
+                    "preferredRole": config.get("preferredRole", ""),
+                }
+                config["peerAddress"] = invite.address
+                config["settings"]["hmac"] = invite.hmac
+                config["preferredRole"] = "caller"
+                restart = self._quiesce_listener()
+                try:
+                    self._commit_invite_config(previous_config, config, invite.secret)
+                except OSError as exc:
+                    try:
+                        save_desired_online(self.paths, False)
+                    except OSError:
+                        pass
+                    self.status["phase"] = "error"
+                    raise OmaphoneError(
+                        "Could not save that invite. This phone was left offline."
+                    ) from exc
+                self.status["remoteAddress"] = invite.address
+                try:
+                    self._start_invocation("call", invite.address)
+                except OmaphoneError:
+                    if restart:
+                        try:
+                            self._start_invocation("listen")
+                        except OmaphoneError:
+                            pass
+                    raise
+                return self._response()
+            if command == "clear-peer":
+                config = load_app_config(self.paths)
+                restart = self._quiesce_listener()
+                config["peerAddress"] = ""
+                config["preferredRole"] = ""
+                try:
+                    save_app_config(self.paths, config)
+                except OSError as exc:
+                    try:
+                        save_desired_online(self.paths, False)
+                    except OSError:
+                        pass
+                    self.status["phase"] = "error"
+                    raise OmaphoneError(
+                        "Could not clear the paired phone. This phone was left offline."
+                    ) from exc
+                self.status["remoteAddress"] = ""
+                if restart:
+                    try:
+                        self._start_invocation("listen")
+                    except OmaphoneError as exc:
+                        self.status["phase"] = "error"
+                        self.status["lastError"] = str(exc)
+                else:
+                    self.status["phase"] = "offline" if self.status["configured"] else "unconfigured"
                     self.status["lastError"] = ""
                 return self._response()
             if command == "clear-chat":
@@ -1915,7 +2359,8 @@ def build_argument_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
     for name in (
         "status", "setup", "install-deps", "online", "offline", "send", "pair",
-        "invite", "audio-test", "hangup", "relay", "clear-chat", "shutdown",
+        "join", "call-peer", "clear-peer", "invite", "audio-test", "hangup",
+        "relay", "clear-chat", "shutdown",
     ):
         commands.add_parser(name)
     call_parser = commands.add_parser("call")
@@ -1949,7 +2394,7 @@ def cli_request(arguments: argparse.Namespace) -> dict[str, Any]:
         if not text:
             raise OmaphoneError("message must not be empty")
         request["text"] = text
-    elif command == "pair":
+    elif command in {"pair", "join"}:
         request["invite"] = read_one_stdin_line(sys.stdin.buffer, MAX_INVITE_BYTES, "invite")
     return request
 

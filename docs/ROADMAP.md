@@ -37,31 +37,38 @@ That boundary creates four honest development lanes:
 
 | Lane | Good fits | Boundary |
 | --- | --- | --- |
-| **Current wire** | contacts, authenticated recents, quick text signals, voice drafts, local captions, better room rituals | both peers still need a live TerminalPhone connection |
-| **Omaphone Protocol v2** | files, images, receipts, resumable Drops, video Postcards, per-device identity | both peers need the new protocol; legacy fallback remains |
+| **Current wire** | one paired phone, quick text signals, voice drafts, local captions, better room rituals | both peers still need a live TerminalPhone connection and share its one global key |
+| **Omaphone Protocol v2** | named contacts with per-contact keys, files, receipts, resumable Drops, video Postcards, per-device identity | both peers need the new protocol; legacy fallback remains |
 | **Self-hosted switchboard** | offline delivery, persistent rooms, multi-device pickup | a trusted machine must stay online and will see metadata |
 | **New live-media lane** | live audio, video, screen sharing | not a Bash/PTY feature and not a clean fit for Tor's TCP streams |
 
 ## Horizon 1 — Known voices
 
-Make the second conversation dramatically easier than the first.
+Grow beyond the one **Paired phone** that Omaphone 1.2 can call again.
 
 ### People that accrue naturally
 
-After the first successfully authenticated conversation, ask **Keep this
-person?** Let the user give the relationship a local name such as “Ada” or
-“Studio”. The name never leaves the device and never pretends to verify a real
-identity.
+Omaphone 1.2 guides the first connection, keeps one stable device onion address,
+remembers one paired phone, and remembers whether this computer normally waits
+or calls. TerminalPhone still uses one global shared secret; it does not ship
+person-specific keys or multiple contact profiles. After a successfully
+authenticated conversation, a future version can ask **Keep this person?** and
+let the user give the relationship a local name such as “Ada” or “Studio”. The
+name never leaves the device and never pretends to verify a real identity.
 
-Each saved person owns a complete profile: onion address, call key, matching
-settings, and scoped local history. Only an authenticated conversation can
-enter **Recent**. Failed calls, pasted addresses, unknown incoming attempts,
-and unauthenticated sessions never create people silently.
+The target keeps one device address—one private phone number—while each saved
+person owns a distinct cryptographic relationship key, matching capabilities,
+and scoped local history. Those keys stay invisible in normal UI. Only an
+authenticated conversation can enter **Recent**. Failed calls, pasted
+addresses, unknown incoming attempts, and unauthenticated sessions never create
+people silently.
 
-TerminalPhone has one active profile, so the UI must say **Listening for Ada**,
-not “listening for everyone”. Switching people atomically stops one listener,
-changes the whole profile, and starts the next. The storage and migration plan
-is detailed in [Contacts roadmap](CONTACTS.md).
+TerminalPhone cannot get there by putting several names beside its one shared
+secret. The ordinary multi-contact design needs a versioned listener that can
+select and authenticate separate relationship keys behind the stable device
+address. Fully isolated TerminalPhone profiles and onion identities can remain
+an advanced privacy mode. The storage, migration, and trust boundaries are
+detailed in [Contacts roadmap](CONTACTS.md).
 
 ### Experiments only after People is solid
 
@@ -90,9 +97,10 @@ runtime files or lifecycle state.
 
 ### Horizon gate
 
-- A returning user can call a saved person in two actions.
+- A returning user can choose among saved people and call one in two actions.
 - No unverified event silently creates or changes a person.
-- A user can explain exactly whom Omaphone is listening for.
+- A user can explain that the device has one number while every saved person
+  has a separate relationship key.
 - Group participants understand who hosts, who can talk, and how to leave.
 
 ## Horizon 2 — Private Drops
@@ -262,8 +270,9 @@ reason Omaphone is delightful.
 
 ## The next three bets
 
-1. **People and profiles.** Build the safe address-book foundation and migrate
-   today's single peer without guessing identity.
+1. **People and relationship keys.** Keep one stable device number, build
+   separate invisible per-contact keys, and migrate 1.2's single **Paired
+   phone** without guessing identity or cloning its legacy global key.
 2. **Write the v2 envelope before shipping blobs.** Specify capabilities,
    framing, storage limits, cryptographic boundaries, and downgrade behavior;
    publish test vectors.

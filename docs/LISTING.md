@@ -16,11 +16,12 @@ Ready-to-paste copy for the Omarchy plugin site, GitHub, and launch posts.
 
 ## Long description
 
-Omaphone puts a private walkie-talkie in the Omarchy 4 bar. Open the widget,
-pair a friend's invite, and press one big button to talk. Hold to record;
-release to encrypt and send. Text chat, incoming calls, audio testing, voice
-effects, and call-quality controls are there when you want them without turning
-the experience into a terminal configuration project.
+Omaphone puts a private walkie-talkie in the Omarchy 4 bar. On one computer,
+choose **Share my phone**. On the other, choose **Add a phone**, paste its
+private contact card, and choose **Add & connect**. Hold one big button to
+record; release to encrypt and send. Text chat, audio testing, voice effects,
+and call-quality controls are there when you want them without turning the
+experience into a terminal configuration project.
 
 Under the friendly panel is TerminalPhone: a terminal-native voice and chat
 tool carried through Tor onion services. Omaphone keeps that pinned upstream
@@ -39,8 +40,9 @@ record-then-send push-to-talk, not live audio mixing.
 - Private direct calls through Tor onion services.
 - Hold to record; release to send.
 - Encrypted voice messages and in-call text chat.
-- Copy-and-paste invites instead of manual network setup.
-- Clear incoming-call, connected, speaking, and listening states.
+- A two-action first call: share and wait on one computer; add and connect on
+  the other.
+- Clear Tor progress, connected, speaking, and waiting states.
 - Experimental small-group rooms hosted from a local machine.
 - Audio test, quality presets, voice effects, and chimes.
 - Optional Snowflake and message-authentication controls.
@@ -56,8 +58,8 @@ omarchy plugin add https://github.com/tomdavenport/omaphone.git --enable --yes
 ```
 
 Open the phone in the bar and choose **Set up Omaphone**. If prompted, choose
-**Install missing tools**, then go online. The first Tor connection can
-take a minute or two.
+**Install missing tools**. The guided first-call buttons handle the listener
+and Tor route; the first connection can take a minute or two.
 
 Remove it cleanly with:
 
@@ -79,21 +81,23 @@ release to send, and let Tor carry it.
 ### Short post
 
 Meet Omaphone: a little private walkie-talkie that lives in the Omarchy 4 bar.
-Pair an invite, hold the big button to record, and release to send through Tor.
-It also has encrypted text chat, incoming calls, voice effects, and an
-experimental room host for small groups. TerminalPhone does the serious work;
-Omaphone makes it feel simple and fun.
+Share one phone's private contact card; add and connect from the other. Then
+hold the big button to record and release to send through Tor. It also has
+encrypted text chat, voice effects, and an experimental room host for small
+groups. TerminalPhone does the serious work; Omaphone makes it feel simple and
+fun.
 
 ### GitHub release intro
 
 Omaphone turns TerminalPhone into a native Omarchy 4 widget. The first release
-wraps private Tor calls, record-then-send push-to-talk, encrypted chat, invites,
-audio setup, and an experimental multi-caller relay in one compact bar panel.
+wraps private Tor calls, record-then-send push-to-talk, encrypted chat, private
+contact cards, audio setup, and an experimental multi-caller relay in one
+compact bar panel.
 There is no terminal session to babysit and no public server to configure.
 
 ### Plugin-site call to action
 
-Put a phone in your bar. Share an invite privately, call a friend, and hold to
+Put a phone in your bar. Share its private contact card, connect, and hold to
 talk.
 
 ## Artwork notes
@@ -105,8 +109,8 @@ The ready-to-upload GitHub social card is
 The image should be a real screenshot from a clean, disposable Omarchy 4 VM,
 lightly composed for each destination. It should look like a carefully riced
 Omarchy desktop while keeping the Omaphone widget legible at thumbnail size.
-Never capture or publish a real invite, room key, onion address, username,
-notification, network name, or other personal data.
+Never capture or publish a real contact card, room invite, room key, onion
+address, username, notification, network name, or other personal data.
 
 Use these four plain-English feature bullets in the image:
 
@@ -131,8 +135,15 @@ Recommended exports:
 - Omaphone and TerminalPhone have not been independently security audited.
 - Voice is recorded while the button is held and sent on release; it is not a
   continuous live-audio call.
-- Invites contain a shared room key and must be shared through a trusted,
-  private channel.
+- TerminalPhone has no telephone-style ringing or answer phase. One computer
+  waits while the other connects; sounds are connection or push-to-talk
+  feedback, not a ringtone.
+- Private contact cards and room invites contain a shared room key and must be
+  shared through a trusted, private channel.
+- Omaphone 1.2 has one stable device onion address, TerminalPhone's one global
+  direct-call secret, and one saved paired phone. It does not create a unique
+  number or isolated key for each named person. Adding another private contact
+  card—or using a room invite—replaces that pairing and active key.
 - The experimental group host forwards opaque traffic and does not join the
   conversation. It exposes connection count, timing, and traffic-volume
   metadata to the host and is not a moderation or admission-control service.

@@ -196,6 +196,8 @@ class PathAndPermissionTests(TemporaryPathsTestCase):
 class ReleaseContractTests(unittest.TestCase):
     def test_manifest_version_matches_backend_handshake_version(self) -> None:
         manifest = json.loads((REPOSITORY_ROOT / "manifest.json").read_text("utf-8"))
+        self.assertEqual(manifest["version"], "1.2.0")
+        self.assertEqual(omaphone.BACKEND_VERSION, "1.2.0")
         self.assertEqual(manifest["version"], omaphone.BACKEND_VERSION)
 
     def test_snowflake_package_and_recovery_commands_match_the_binary_contract(self) -> None:
@@ -214,7 +216,72 @@ class ReleaseContractTests(unittest.TestCase):
             "omarchy-shell omaphone.phone setConfig snowflake false",
             documentation,
         )
+        service = (REPOSITORY_ROOT / "Service.qml").read_text("utf-8")
+        self.assertIn("function setConfig(key: string, value: string) : string", service)
         self.assertNotRegex(documentation, r"\bsnowflake-pt-client(?!-bin)\b")
+
+    def test_guided_qml_and_readme_keep_the_two_action_first_call_contract(self) -> None:
+        panel = (REPOSITORY_ROOT / "Panel.qml").read_text("utf-8")
+        service = (REPOSITORY_ROOT / "Service.qml").read_text("utf-8")
+        readme = (REPOSITORY_ROOT / "README.md").read_text("utf-8")
+        first_call = readme.split("## Make your first private call", 1)[1].split(
+            "## Host a group room", 1
+        )[0]
+
+        for literal in (
+            "Share my phone",
+            "Copies a private contact card and waits",
+            "Add a phone",
+            "Paste their private contact card",
+            "Add & connect",
+            "PAIRED PHONE",
+            "Call paired phone",
+            "Wait for paired phone",
+            "Stop waiting",
+            "Connect from this computer instead",
+            "Wait on this computer instead",
+            "This computer was paired with itself. No harm done.",
+            "Add the other phone",
+            "Clear pairing",
+        ):
+            with self.subTest(literal=literal):
+                self.assertIn(literal, panel)
+
+        self.assertIn(
+            "Contact card copied — send it privately and leave this computer waiting.",
+            service,
+        )
+        self.assertNotIn("Use an invite", panel)
+        self.assertNotIn("Go online before placing a call", service)
+        self.assertIn("Advanced only: call a full Tor address directly", panel)
+
+        for literal in ("**Share my phone**", "**Add a phone**", "**Add & connect**"):
+            self.assertIn(literal, first_call)
+        self.assertNotIn("**Go online**", first_call)
+        self.assertNotIn("**Call**", first_call)
+        self.assertIn("no telephone-style ringing or separate answer phase", first_call)
+        self.assertIn("Sounds are connection and push-to-talk feedback", first_call)
+        self.assertIn("one stable", first_call)
+        self.assertIn("one global direct-call secret", first_call)
+
+    def test_service_consumes_guided_status_and_uses_atomic_backend_commands(self) -> None:
+        service = (REPOSITORY_ROOT / "Service.qml").read_text("utf-8")
+        for field in (
+            "pairedAddress",
+            "hasPeer",
+            "selfPeer",
+            "preferredRole",
+            "callStage",
+            "torProgress",
+            "lastCallOutcome",
+            "lastCallMessage",
+            "callOutcomeSequence",
+        ):
+            with self.subTest(field=field):
+                self.assertIn(f'"{field}"', service)
+        self.assertIn('runAction(["join"], invite, "join")', service)
+        self.assertIn('runAction(["call-peer"], "", "call-peer")', service)
+        self.assertIn('runAction(["clear-peer"], "", "clear-peer")', service)
 
 
 class PinnedAssetTests(TemporaryPathsTestCase):
@@ -507,6 +574,77 @@ class SecretAndInviteTests(TemporaryPathsTestCase):
         self.assertEqual(status_value["missingDependencies"], ["snowflake-client"])
         self.assertFalse(status_value["snowflakeAvailable"])
 
+    def test_initial_status_derives_paired_and_self_peer_without_exposing_secret(self) -> None:
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        omaphone.ensure_private_dir(self.paths.onion_file.parent)
+        self.paths.onion_file.write_text(VALID_ONION + "\n", encoding="ascii")
+        omaphone.save_app_config(
+            self.paths,
+            {
+                "settings": dict(omaphone.DEFAULT_SETTINGS),
+                "peerAddress": VALID_ONION,
+                "preferredRole": "caller",
+            },
+        )
+
+        with (
+            mock.patch.object(omaphone, "backend_installed", return_value=True),
+            mock.patch.object(omaphone, "dependency_status", return_value=[]),
+            mock.patch.object(omaphone, "snowflake_available", return_value=True),
+        ):
+            status_value = omaphone.build_initial_status(self.paths)
+
+        self.assertEqual(status_value["pairedAddress"], VALID_ONION)
+        self.assertTrue(status_value["hasPeer"])
+        self.assertTrue(status_value["selfPeer"])
+        self.assertEqual(status_value["preferredRole"], "caller")
+        self.assertNotIn(VALID_SECRET, json.dumps(status_value, sort_keys=True))
+
+    def test_call_outcome_survives_daemon_restart_as_fixed_bounded_copy(self) -> None:
+        omaphone.atomic_json(
+            self.paths.status_file,
+            {
+                "lastCallOutcome": "timeout",
+                "lastCallMessage": "untrusted persisted copy",
+                "callOutcomeSequence": 17,
+            },
+        )
+        with (
+            mock.patch.object(omaphone, "backend_installed", return_value=False),
+            mock.patch.object(omaphone, "dependency_status", return_value=[]),
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+        ):
+            status_value = omaphone.build_initial_status(self.paths)
+
+        self.assertEqual(status_value["lastCallOutcome"], "timeout")
+        self.assertEqual(status_value["lastCallMessage"], omaphone.CALL_TIMEOUT_MESSAGE)
+        self.assertEqual(status_value["callOutcomeSequence"], 17)
+        self.assertNotIn("untrusted", status_value["lastCallMessage"])
+
+    def test_legacy_peer_status_derives_role_from_desired_listener_state(self) -> None:
+        legacy_config = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+        }
+        with (
+            mock.patch.object(omaphone, "backend_installed", return_value=False),
+            mock.patch.object(omaphone, "dependency_status", return_value=[]),
+            mock.patch.object(omaphone, "snowflake_available", return_value=False),
+        ):
+            for online, expected_role in ((True, "listener"), (False, "caller")):
+                with self.subTest(online=online):
+                    omaphone.atomic_json(self.paths.app_config, legacy_config)
+                    omaphone.save_desired_online(self.paths, online)
+
+                    status_value = omaphone.build_initial_status(self.paths)
+
+                    self.assertEqual(status_value["preferredRole"], expected_role)
+                    self.assertEqual(status_value["pairedAddress"], VALID_ONION)
+                    self.assertTrue(status_value["hasPeer"])
+                    # Migration is presentation-only until the next explicit
+                    # listen/call action chooses and persists a role.
+                    self.assertEqual(omaphone.load_app_config(self.paths)["preferredRole"], "")
+
 
 class OnionValidationTests(TemporaryPathsTestCase):
     def test_normalize_accepts_only_v3_base32_host_with_optional_http_scheme(self) -> None:
@@ -615,8 +753,34 @@ class ConfigurationTests(TemporaryPathsTestCase):
             {
                 "settings": expected_settings,
                 "peerAddress": VALID_ONION,
+                "preferredRole": "",
             },
         )
+
+    def test_preferred_role_migrates_old_config_and_accepts_only_known_roles(self) -> None:
+        legacy = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+        }
+        omaphone.atomic_json(self.paths.app_config, legacy)
+        migrated = omaphone.load_app_config(self.paths)
+        self.assertEqual(migrated["peerAddress"], VALID_ONION)
+        self.assertEqual(migrated["preferredRole"], "")
+
+        for role in ("caller", "listener"):
+            with self.subTest(role=role):
+                omaphone.atomic_json(self.paths.app_config, {**legacy, "preferredRole": role})
+                self.assertEqual(omaphone.load_app_config(self.paths)["preferredRole"], role)
+
+        for invalid in (None, True, "receiver", "CALLER", 7, [], {}):
+            with self.subTest(invalid=invalid):
+                omaphone.atomic_json(
+                    self.paths.app_config,
+                    {**legacy, "preferredRole": invalid},
+                )
+                loaded = omaphone.load_app_config(self.paths)
+                self.assertEqual(loaded["peerAddress"], VALID_ONION)
+                self.assertEqual(loaded["preferredRole"], "")
 
     def test_load_config_rejects_bad_shapes_and_noncanonical_peer(self) -> None:
         cases = (
@@ -632,6 +796,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
                 loaded = omaphone.load_app_config(self.paths)
                 self.assertEqual(loaded["settings"], omaphone.DEFAULT_SETTINGS)
                 self.assertEqual(loaded["peerAddress"], "")
+                self.assertEqual(loaded["preferredRole"], "")
 
     def test_save_config_serializes_app_and_exact_safe_upstream_format(self) -> None:
         config = {
@@ -643,6 +808,7 @@ class ConfigurationTests(TemporaryPathsTestCase):
                 "hmac": False,
             },
             "peerAddress": SECOND_ONION,
+            "preferredRole": "caller",
         }
         omaphone.save_app_config(self.paths, config)
 
@@ -672,6 +838,33 @@ class ConfigurationTests(TemporaryPathsTestCase):
         self.assertEqual(first["settings"], omaphone.DEFAULT_SETTINGS)
         self.assertIs(first["relayReady"], False)
         self.assertIs(first["snowflakeAvailable"], False)
+        self.assertEqual(
+            {
+                key: first[key]
+                for key in (
+                    "pairedAddress",
+                    "hasPeer",
+                    "selfPeer",
+                    "preferredRole",
+                    "callStage",
+                    "torProgress",
+                    "lastCallOutcome",
+                    "lastCallMessage",
+                    "callOutcomeSequence",
+                )
+            },
+            {
+                "pairedAddress": "",
+                "hasPeer": False,
+                "selfPeer": False,
+                "preferredRole": "",
+                "callStage": "",
+                "torProgress": 0,
+                "lastCallOutcome": "",
+                "lastCallMessage": "",
+                "callOutcomeSequence": 0,
+            },
+        )
         self.assertNotIn("secret", first)
         first["settings"]["hmac"] = not first["settings"]["hmac"]
         self.assertEqual(second["settings"], omaphone.DEFAULT_SETTINGS)
@@ -764,6 +957,57 @@ class OutputParserTests(unittest.TestCase):
         for text, kind in cases:
             with self.subTest(text=text):
                 self.assertHasEvent(omaphone.parse_terminal_output(text), kind)
+
+    def test_call_progress_controls_are_exact_bounded_and_address_free(self) -> None:
+        self.assertEqual(
+            omaphone.parse_terminal_output("[INFO] Starting Tor..."),
+            [omaphone.OutputEvent("tor_start")],
+        )
+        for percent in (0, 1, 37, 99, 100):
+            with self.subTest(percent=percent):
+                events = omaphone.parse_terminal_output(
+                    f"Bootstrapped {percent}% (loading): Loading authority key certs"
+                )
+                self.assertEqual(events, [omaphone.OutputEvent("tor_progress", str(percent))])
+
+        for port in (1, 7777, 65_535):
+            with self.subTest(port=port):
+                display = f"Connecting to {VALID_ONION}:{port} via Tor..."
+                events = omaphone.parse_terminal_output(display)
+                self.assertEqual(events, [omaphone.OutputEvent("dialing")])
+                self.assertNotIn(VALID_ONION, repr(events))
+
+        rejected = (
+            "[info] Starting Tor...",
+            "[INFO] Starting Tor..",
+            "prefix [INFO] Starting Tor...",
+            "Bootstrapped -1%",
+            "Bootstrapped 101%",
+            "Bootstrapped 1000%",
+            "Bootstrapped 50% (phase with (nesting)): detail",
+            f"Connecting to {VALID_ONION}:0 via Tor...",
+            f"Connecting to {VALID_ONION}:65536 via Tor...",
+            f"Connecting to {VALID_ONION}:7777 via Tor..",
+            f"Connecting to {VALID_ONION} via Tor...",
+            f"[MSG] Bootstrapped 50% Connecting to {VALID_ONION}:7777 via Tor...",
+        )
+        for display in rejected:
+            with self.subTest(display=display[:80]):
+                kinds = {event.kind for event in omaphone.parse_terminal_output(display)}
+                self.assertTrue(kinds.isdisjoint({"tor_start", "tor_progress", "dialing"}))
+
+        hidden_prefix = "Bootstrapped 99%" + "x" * omaphone.MAX_LINE_CHARS
+        kinds = {event.kind for event in omaphone.parse_terminal_output(hidden_prefix + "safe")}
+        self.assertTrue(kinds.isdisjoint({"tor_start", "tor_progress", "dialing"}))
+
+    def test_stream_parser_tracks_fragmented_progress_once_per_exact_value(self) -> None:
+        parser = omaphone.OutputStreamParser()
+        _cleaned, first = parser.feed(b"Bootstrapped 4")
+        _cleaned, second = parser.feed(b"2% (done): Finishing\n")
+        _cleaned, third = parser.feed(b"Bootstrapped 42%\n")
+        self.assertEqual(first, [])
+        self.assertEqual(second, [omaphone.OutputEvent("tor_progress", "42")])
+        self.assertEqual(third, [omaphone.OutputEvent("tor_progress", "42")])
 
     def test_parses_onion_connected_and_talking_events(self) -> None:
         events = omaphone.parse_terminal_output(
@@ -912,6 +1156,37 @@ class SupervisorContractTests(TemporaryPathsTestCase):
             started_at=1.0,
             address=address,
         )
+
+    def bare_supervisor(
+        self,
+        invocation: object | None = None,
+        **status_overrides: object,
+    ) -> object:
+        supervisor = object.__new__(omaphone.Supervisor)
+        supervisor.paths = self.paths
+        supervisor.selector = mock.Mock()
+        supervisor.invocation = invocation
+        supervisor.pending_invocation = None
+        supervisor.pending_text = None
+        supervisor.stop_reason = ""
+        supervisor.stop_deadline = 0.0
+        supervisor.stop_escalation_stage = 0
+        supervisor.ptt_next = 0.0
+        supervisor.ptt_deadline = 0.0
+        supervisor.listener_failures = 0
+        supervisor.listener_retry_at = 0.0
+        supervisor.last_client_at = 0.0
+        supervisor.running = True
+        supervisor.status = {
+            **omaphone.status_defaults(),
+            "configured": True,
+            "dependenciesReady": True,
+            **status_overrides,
+        }
+        supervisor._refresh_static = mock.Mock()
+        supervisor._persist = mock.Mock()
+        supervisor._write_pty = mock.Mock(return_value=True)
+        return supervisor
 
     def test_pty_queue_preserves_order_across_partial_write_and_eagain(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
@@ -1133,6 +1408,174 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         supervisor._write_pty.assert_not_called()
         supervisor._persist.assert_called_once_with()
 
+    def test_dial_timeout_clock_starts_only_after_exact_dialing_event(self) -> None:
+        invocation = self.invocation("call", VALID_ONION)
+        invocation.started_at = 1.0
+        supervisor = self.bare_supervisor(
+            invocation,
+            phase="calling",
+            callStage="preparing",
+        )
+        supervisor.last_client_at = 1_000.0
+
+        with mock.patch.object(omaphone.time, "monotonic", return_value=10.0):
+            supervisor._handle_output_event(omaphone.OutputEvent("tor_start"))
+        self.assertEqual(supervisor.status["callStage"], "opening-tor")
+        self.assertEqual(invocation.dial_started_at, 0.0)
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=70.0),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+        self.assertEqual(supervisor.stop_reason, "")
+        self.assertEqual(supervisor.status["lastCallOutcome"], "")
+
+        with mock.patch.object(omaphone.time, "monotonic", return_value=100.0):
+            supervisor._handle_output_event(omaphone.OutputEvent("dialing"))
+        self.assertEqual(invocation.dial_started_at, 100.0)
+        self.assertEqual(supervisor.status["callStage"], "dialing")
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=159.999),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+        self.assertEqual(supervisor.stop_reason, "")
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=160.0),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+
+        self.assertEqual(omaphone.CALL_DIAL_TIMEOUT_SECONDS, 60.0)
+        self.assertEqual(supervisor.stop_reason, "call-timeout")
+        self.assertEqual(invocation.timeout_outcome, "timeout")
+        self.assertEqual(supervisor.status["lastCallOutcome"], "timeout")
+        self.assertEqual(supervisor.status["lastCallMessage"], omaphone.CALL_TIMEOUT_MESSAGE)
+        self.assertEqual(supervisor.status["callOutcomeSequence"], 1)
+        supervisor._write_pty.assert_called_once_with(b"Q\n")
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=160.5),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+        self.assertEqual(supervisor.status["callOutcomeSequence"], 1)
+
+    def test_overall_call_guard_bounds_tor_bootstrap_at_360_seconds(self) -> None:
+        invocation = self.invocation("call", VALID_ONION)
+        invocation.started_at = 10.0
+        supervisor = self.bare_supervisor(
+            invocation,
+            phase="calling",
+            callStage="opening-tor",
+            torProgress=80,
+        )
+        supervisor.last_client_at = 1_000.0
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=369.999),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+        self.assertEqual(invocation.dial_started_at, 0.0)
+        self.assertEqual(supervisor.stop_reason, "")
+
+        with (
+            mock.patch.object(omaphone.time, "monotonic", return_value=370.0),
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            supervisor._tick()
+
+        self.assertEqual(omaphone.CALL_SETUP_TIMEOUT_SECONDS, 360.0)
+        self.assertEqual(omaphone.CALL_OVERALL_TIMEOUT_SECONDS, 360.0)
+        self.assertEqual(supervisor.stop_reason, "call-timeout")
+        self.assertEqual(supervisor.status["lastCallOutcome"], "timeout")
+
+    def test_failed_call_outcome_survives_automatic_listener_restart(self) -> None:
+        omaphone.save_desired_online(self.paths, True)
+        outgoing = self.invocation("call", VALID_ONION)
+        supervisor = self.bare_supervisor(
+            outgoing,
+            phase="calling",
+            online=True,
+            callStage="dialing",
+        )
+
+        def start_listener(kind: str, address: str = "") -> None:
+            self.assertEqual((kind, address), ("listen", ""))
+            supervisor.invocation = self.invocation("listen")
+
+        supervisor._start_invocation = mock.Mock(side_effect=start_listener)
+        with mock.patch.object(omaphone.os, "close"):
+            supervisor._finish_invocation(0)
+
+        self.assertEqual(supervisor.status["lastCallOutcome"], "failed")
+        self.assertEqual(supervisor.status["lastCallMessage"], omaphone.CALL_FAILED_MESSAGE)
+        self.assertEqual(supervisor.status["callOutcomeSequence"], 1)
+        supervisor._start_invocation.assert_called_once_with("listen")
+
+        supervisor._handle_output_event(omaphone.OutputEvent("listening"))
+        self.assertEqual(supervisor.status["phase"], "listening")
+        self.assertEqual(supervisor.status["lastCallOutcome"], "failed")
+        self.assertEqual(supervisor.status["callOutcomeSequence"], 1)
+
+    def test_deliberate_hangup_during_dialing_never_publishes_failure(self) -> None:
+        omaphone.save_desired_online(self.paths, False)
+        outgoing = self.invocation("call", VALID_ONION)
+        outgoing.dial_started_at = 50.0
+        supervisor = self.bare_supervisor(
+            outgoing,
+            phase="calling",
+            callStage="dialing",
+            torProgress=100,
+        )
+
+        with mock.patch.object(omaphone.time, "monotonic", return_value=55.0):
+            response = supervisor.dispatch({"command": "hangup"})
+        self.assertTrue(response["ok"])
+        self.assertEqual(supervisor.stop_reason, "hangup")
+
+        with mock.patch.object(omaphone.os, "close"):
+            supervisor._finish_invocation(7 << 8)
+
+        self.assertEqual(supervisor.status["phase"], "offline")
+        self.assertEqual(supervisor.status["lastCallOutcome"], "")
+        self.assertEqual(supervisor.status["lastCallMessage"], "")
+        self.assertEqual(supervisor.status["callOutcomeSequence"], 0)
+
+    def test_stop_escalation_sends_q_then_term_then_kill_to_verified_group_once(self) -> None:
+        invocation = self.invocation("call", VALID_ONION)
+        supervisor = self.bare_supervisor(invocation, phase="calling")
+        supervisor.last_client_at = 1_000.0
+
+        with mock.patch.object(omaphone.time, "monotonic", return_value=100.0):
+            supervisor._request_stop("hangup")
+        supervisor._write_pty.assert_called_once_with(b"Q\n")
+
+        with (
+            mock.patch.object(omaphone.os, "getpgid", return_value=invocation.pid),
+            mock.patch.object(omaphone.os, "killpg") as kill_group,
+            mock.patch.object(omaphone.os, "kill") as kill_pid,
+            mock.patch.object(omaphone.os, "waitpid", return_value=(0, 0)),
+        ):
+            for now in (104.999, 105.0, 106.999, 107.0, 200.0):
+                with mock.patch.object(omaphone.time, "monotonic", return_value=now):
+                    supervisor._tick()
+
+        self.assertEqual(
+            kill_group.call_args_list,
+            [
+                mock.call(invocation.pid, omaphone.signal.SIGTERM),
+                mock.call(invocation.pid, omaphone.signal.SIGKILL),
+            ],
+        )
+        kill_pid.assert_not_called()
+        self.assertEqual(supervisor.stop_escalation_stage, 2)
+        self.assertEqual(supervisor.stop_deadline, 0.0)
+
     def test_invalid_live_pair_and_config_are_validated_before_listener_quiesce(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
         listener = self.invocation("listen")
@@ -1156,6 +1599,290 @@ class SupervisorContractTests(TemporaryPathsTestCase):
 
         supervisor._quiesce_listener.assert_not_called()
         load_config.assert_not_called()
+
+    def test_self_call_and_self_invites_are_rejected_before_mutation(self) -> None:
+        omaphone.ensure_private_dir(self.paths.onion_file.parent)
+        self.paths.onion_file.write_text(VALID_ONION + "\n", encoding="ascii")
+        listener = self.invocation("listen")
+        supervisor = self.bare_supervisor(
+            listener,
+            phase="listening",
+            online=True,
+            onion=VALID_ONION,
+        )
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+        supervisor._transition = mock.Mock()
+        supervisor._save_wrapper_config = mock.Mock()
+        self_invite = omaphone.create_invite(VALID_SECRET, VALID_ONION)
+
+        with (
+            mock.patch.object(
+                omaphone,
+                "load_app_config",
+                return_value={
+                    "settings": dict(omaphone.DEFAULT_SETTINGS),
+                    "peerAddress": VALID_ONION,
+                    "preferredRole": "caller",
+                },
+            ) as load_config,
+            mock.patch.object(omaphone, "save_app_config") as save_config,
+            mock.patch.object(omaphone, "atomic_write") as write_secret,
+        ):
+            requests = (
+                {"command": "call", "address": VALID_ONION},
+                {"command": "call-peer"},
+                {"command": "pair", "invite": self_invite},
+                {"command": "join", "invite": self_invite},
+            )
+            for request in requests:
+                with self.subTest(command=request["command"]):
+                    response = supervisor.dispatch(request)
+                    self.assertFalse(response["ok"])
+                    self.assertEqual(response["error"], omaphone.SELF_CONNECTION_MESSAGE)
+                    self.assertIs(supervisor.invocation, listener)
+
+        # call-peer must load the existing peer, but every path rejects before
+        # saving, stopping the listener, changing the secret, or starting a call.
+        self.assertEqual(load_config.call_count, 1)
+        supervisor._quiesce_listener.assert_not_called()
+        supervisor._save_wrapper_config.assert_not_called()
+        supervisor._transition.assert_not_called()
+        save_config.assert_not_called()
+        write_secret.assert_not_called()
+
+    def test_join_requires_a_valid_address_before_quiesce_save_or_secret_write(self) -> None:
+        listener = self.invocation("listen")
+        supervisor = self.bare_supervisor(listener, phase="listening", online=True)
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+        supervisor._start_invocation = mock.Mock()
+        addressless = omaphone.create_invite(VALID_SECRET)
+
+        with (
+            mock.patch.object(omaphone, "load_app_config") as load_config,
+            mock.patch.object(omaphone, "save_app_config") as save_config,
+            mock.patch.object(omaphone, "atomic_write") as write_secret,
+        ):
+            for code in ("not-an-invite", addressless):
+                with self.subTest(code=code[:30]):
+                    response = supervisor.dispatch({"command": "join", "invite": code})
+                    self.assertFalse(response["ok"])
+                    self.assertIs(supervisor.invocation, listener)
+
+        load_config.assert_not_called()
+        supervisor._quiesce_listener.assert_not_called()
+        save_config.assert_not_called()
+        write_secret.assert_not_called()
+        supervisor._start_invocation.assert_not_called()
+
+    def test_join_validates_then_commits_complete_profile_before_starting_call(self) -> None:
+        listener = self.invocation("listen")
+        supervisor = self.bare_supervisor(listener, phase="listening", online=True)
+        invitation = omaphone.create_invite(
+            VALID_SECRET,
+            SECOND_ONION,
+            hmac_enabled=False,
+        )
+        current_config = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+            "preferredRole": "listener",
+        }
+        events: list[str] = []
+        saved_configs: list[dict[str, object]] = []
+        original_parse = omaphone.parse_invite
+
+        def parse(code: str) -> object:
+            events.append("validate")
+            return original_parse(code)
+
+        def load(_paths: object) -> dict[str, object]:
+            events.append("load")
+            return {
+                "settings": dict(current_config["settings"]),
+                "peerAddress": current_config["peerAddress"],
+                "preferredRole": current_config["preferredRole"],
+            }
+
+        def quiesce() -> bool:
+            events.append("quiesce")
+            return True
+
+        def save(_paths: object, config: object) -> None:
+            events.append("save-config")
+            saved_configs.append(config)  # type: ignore[arg-type]
+
+        def write_secret(path: Path, value: bytes) -> None:
+            self.assertEqual(path, self.paths.secret_file)
+            self.assertEqual(value, VALID_SECRET.encode("ascii"))
+            events.append("save-secret")
+
+        def start(kind: str, address: str = "") -> None:
+            self.assertEqual((kind, address), ("call", SECOND_ONION))
+            events.append("start-call")
+
+        supervisor._quiesce_listener = mock.Mock(side_effect=quiesce)
+        supervisor._start_invocation = mock.Mock(side_effect=start)
+        with (
+            mock.patch.object(omaphone, "parse_invite", side_effect=parse),
+            mock.patch.object(omaphone, "load_app_config", side_effect=load),
+            mock.patch.object(omaphone, "save_app_config", side_effect=save),
+            mock.patch.object(omaphone, "atomic_write", side_effect=write_secret),
+        ):
+            response = supervisor.dispatch({"command": "join", "invite": invitation})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            events,
+            ["validate", "load", "quiesce", "save-config", "save-secret", "start-call"],
+        )
+        self.assertEqual(len(saved_configs), 1)
+        saved = saved_configs[0]
+        self.assertEqual(saved["peerAddress"], SECOND_ONION)
+        self.assertEqual(saved["preferredRole"], "caller")
+        self.assertFalse(saved["settings"]["hmac"])  # type: ignore[index]
+
+    def test_join_rolls_back_profile_and_secret_on_a_synchronous_commit_failure(self) -> None:
+        previous_config = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+            "preferredRole": "listener",
+        }
+        previous_secret = VALID_SECRET
+        next_secret = "t" * 43
+        omaphone.save_app_config(self.paths, previous_config)
+        omaphone.atomic_write(self.paths.secret_file, previous_secret.encode("ascii"))
+        omaphone.save_desired_online(self.paths, True)
+        supervisor = self.bare_supervisor(
+            self.invocation("listen"),
+            phase="listening",
+            online=True,
+        )
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+        supervisor._start_invocation = mock.Mock()
+        invitation = omaphone.create_invite(next_secret, SECOND_ONION, hmac_enabled=False)
+        original_atomic_write = omaphone.atomic_write
+        injected = False
+
+        def fail_new_secret_once(path: Path, data: bytes, mode: int = 0o600) -> None:
+            nonlocal injected
+            if path == self.paths.secret_file and data == next_secret.encode("ascii") and not injected:
+                injected = True
+                raise OSError("simulated secret commit failure")
+            original_atomic_write(path, data, mode)
+
+        with mock.patch.object(omaphone, "atomic_write", side_effect=fail_new_secret_once):
+            response = supervisor.dispatch({"command": "join", "invite": invitation})
+
+        self.assertTrue(injected)
+        self.assertFalse(response["ok"])
+        self.assertEqual(omaphone.load_app_config(self.paths), previous_config)
+        self.assertEqual(omaphone.read_secret(self.paths), previous_secret)
+        self.assertFalse(omaphone.desired_online(self.paths))
+        supervisor._start_invocation.assert_not_called()
+
+    def test_manual_and_paired_calls_start_directly_while_offline(self) -> None:
+        omaphone.save_desired_online(self.paths, False)
+        cases = (
+            (
+                {"command": "call", "address": SECOND_ONION},
+                "",
+            ),
+            (
+                {"command": "call-peer"},
+                SECOND_ONION,
+            ),
+        )
+        for request, existing_peer in cases:
+            with self.subTest(command=request["command"]):
+                omaphone.save_app_config(
+                    self.paths,
+                    {
+                        "settings": dict(omaphone.DEFAULT_SETTINGS),
+                        "peerAddress": existing_peer,
+                        "preferredRole": "listener",
+                    },
+                )
+                supervisor = self.bare_supervisor(None, phase="offline", online=False)
+                supervisor._transition = mock.Mock()
+
+                response = supervisor.dispatch(request)
+
+                self.assertTrue(response["ok"])
+                supervisor._transition.assert_called_once_with("call", SECOND_ONION)
+                saved = omaphone.load_app_config(self.paths)
+                self.assertEqual(saved["peerAddress"], SECOND_ONION)
+                self.assertEqual(saved["preferredRole"], "caller")
+                self.assertFalse(omaphone.desired_online(self.paths))
+
+    def test_call_peer_requires_a_saved_peer_without_starting_anything(self) -> None:
+        omaphone.save_app_config(
+            self.paths,
+            {
+                "settings": dict(omaphone.DEFAULT_SETTINGS),
+                "peerAddress": "",
+                "preferredRole": "",
+            },
+        )
+        supervisor = self.bare_supervisor(None, phase="offline")
+        supervisor._transition = mock.Mock()
+        supervisor._save_wrapper_config = mock.Mock()
+
+        response = supervisor.dispatch({"command": "call-peer"})
+
+        self.assertFalse(response["ok"])
+        self.assertIn("No other phone", response["error"])
+        supervisor._save_wrapper_config.assert_not_called()
+        supervisor._transition.assert_not_called()
+
+    def test_clear_peer_preserves_secret_and_restarts_an_online_listener(self) -> None:
+        config = {
+            "settings": dict(omaphone.DEFAULT_SETTINGS),
+            "peerAddress": VALID_ONION,
+            "preferredRole": "caller",
+        }
+        omaphone.save_app_config(self.paths, config)
+        omaphone.atomic_write(self.paths.secret_file, VALID_SECRET.encode("ascii"))
+        omaphone.save_desired_online(self.paths, True)
+        supervisor = self.bare_supervisor(
+            self.invocation("listen"),
+            phase="listening",
+            online=True,
+            pairedAddress=VALID_ONION,
+            hasPeer=True,
+        )
+        supervisor._quiesce_listener = mock.Mock(return_value=True)
+        supervisor._start_invocation = mock.Mock()
+
+        response = supervisor.dispatch({"command": "clear-peer"})
+
+        self.assertTrue(response["ok"])
+        saved = omaphone.load_app_config(self.paths)
+        self.assertEqual(saved["peerAddress"], "")
+        self.assertEqual(saved["preferredRole"], "")
+        self.assertEqual(omaphone.read_secret(self.paths), VALID_SECRET)
+        self.assertTrue(omaphone.desired_online(self.paths))
+        supervisor._quiesce_listener.assert_called_once_with()
+        supervisor._start_invocation.assert_called_once_with("listen")
+
+    def test_online_persists_listener_role_before_starting_listener(self) -> None:
+        omaphone.save_app_config(
+            self.paths,
+            {
+                "settings": dict(omaphone.DEFAULT_SETTINGS),
+                "peerAddress": VALID_ONION,
+                "preferredRole": "caller",
+            },
+        )
+        omaphone.save_desired_online(self.paths, False)
+        supervisor = self.bare_supervisor(None, phase="offline", online=False)
+        supervisor._start_invocation = mock.Mock()
+
+        response = supervisor.dispatch({"command": "online"})
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(omaphone.load_app_config(self.paths)["preferredRole"], "listener")
+        self.assertTrue(omaphone.desired_online(self.paths))
+        supervisor._start_invocation.assert_called_once_with("listen")
 
     def test_enabling_missing_snowflake_fails_before_quiesce_or_save(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
@@ -1409,6 +2136,35 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         self.assertFalse(supervisor.status["busy"])
         persisted = json.loads(self.paths.status_file.read_text("utf-8"))
         self.assertFalse(persisted["busy"])
+
+    def test_listener_remembers_incoming_peer_only_with_message_authentication(self) -> None:
+        omaphone.ensure_layout(self.paths)
+        for enabled, expected_peer in ((False, ""), (True, SECOND_ONION)):
+            with self.subTest(hmac=enabled):
+                settings = {**omaphone.DEFAULT_SETTINGS, "hmac": enabled}
+                omaphone.save_app_config(
+                    self.paths,
+                    {"settings": settings, "peerAddress": "", "preferredRole": "listener"},
+                )
+                supervisor = object.__new__(omaphone.Supervisor)
+                supervisor.paths = self.paths
+                supervisor.invocation = self.invocation("listen")
+                supervisor.status = {
+                    **omaphone.status_defaults(settings),
+                    "phase": "listening",
+                }
+                supervisor.pending_text = None
+                supervisor.listener_failures = 0
+                supervisor.listener_retry_at = 0.0
+                supervisor._persist = mock.Mock()
+
+                supervisor._handle_output_event(
+                    omaphone.OutputEvent("connected", SECOND_ONION)
+                )
+
+                self.assertEqual(
+                    omaphone.load_app_config(self.paths)["peerAddress"], expected_peer
+                )
 
     def test_group_call_and_room_size_reset_across_direct_listening_end_and_offline(self) -> None:
         supervisor = object.__new__(omaphone.Supervisor)
@@ -1801,7 +2557,9 @@ class SupervisorContractTests(TemporaryPathsTestCase):
         supervisor._wait_for_child = mock.Mock(side_effect=wait_for_child)
         supervisor.selector.unregister.side_effect = unregister_pty
         with (
-            mock.patch.object(omaphone.os, "kill", side_effect=kill_child),
+            mock.patch.object(omaphone.os, "getpgid", return_value=invocation.pid),
+            mock.patch.object(omaphone.os, "killpg", side_effect=kill_child),
+            mock.patch.object(omaphone.os, "kill") as kill_single_pid,
             mock.patch.object(omaphone.os, "waitpid", side_effect=reap_child),
             mock.patch.object(omaphone.os, "close", side_effect=close_pty),
         ):
@@ -1821,6 +2579,7 @@ class SupervisorContractTests(TemporaryPathsTestCase):
                 ("close", invocation.master_fd),
             ],
         )
+        kill_single_pid.assert_not_called()
         self.assertIsNone(supervisor.invocation)
         self.assertIsNone(supervisor.pending_invocation)
         self.assertIsNone(supervisor.pending_text)
@@ -2226,6 +2985,8 @@ class CliRequestTests(unittest.TestCase):
             (["rotate", "--confirm"], {"command": "rotate", "confirm": True}),
             (["install-deps"], {"command": "install-deps"}),
             (["clear-chat"], {"command": "clear-chat"}),
+            (["call-peer"], {"command": "call-peer"}),
+            (["clear-peer"], {"command": "clear-peer"}),
         )
         for argv, expected in cases:
             with self.subTest(argv=argv):
@@ -2235,10 +2996,11 @@ class CliRequestTests(unittest.TestCase):
         with self.assertRaisesRegex(omaphone.OmaphoneError, "requires --confirm"):
             omaphone.cli_request(self.parser.parse_args(["rotate"]))
 
-    def test_send_and_pair_read_only_the_bounded_stdin_line(self) -> None:
+    def test_send_pair_and_join_read_only_the_bounded_stdin_line(self) -> None:
         cases = (
             (["send"], b"hello\n", {"command": "send", "text": "hello"}),
             (["pair"], b"invite-code\n", {"command": "pair", "invite": "invite-code"}),
+            (["join"], b"contact-card\n", {"command": "join", "invite": "contact-card"}),
         )
         for argv, stdin_value, expected in cases:
             fake_stdin = mock.Mock(buffer=io.BytesIO(stdin_value))

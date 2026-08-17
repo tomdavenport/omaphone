@@ -25,6 +25,15 @@ Item {
         "busy": false,
         "onion": "",
         "remoteAddress": "",
+        "pairedAddress": "",
+        "hasPeer": false,
+        "preferredRole": "",
+        "selfPeer": false,
+        "callStage": "",
+        "torProgress": 0,
+        "lastCallOutcome": "",
+        "lastCallMessage": "",
+        "callOutcomeSequence": 0,
         "groupCall": false,
         "roomSize": 0,
         "relayReady": false,
@@ -39,9 +48,14 @@ Item {
     property string statusReadError: ""
     property string actionError: ""
     property string notice: ""
+    property string cueText: ""
+    property bool inviteAndWaitPending: false
+    property int joinSuccessSequence: 0
     property int pttDesired: 0
     property int pttApplied: 0
     property int stateGeneration: 0
+    property bool endingCall: false
+    property var cueQueue: []
     readonly property string phase: String(phoneStatus.phase || "unconfigured")
     readonly property bool configured: phoneStatus.configured === true
     readonly property bool backendInstalled: phoneStatus.backendInstalled === true
@@ -62,7 +76,102 @@ Item {
     readonly property bool fastPolling: phoneStatus.busy === true || phase === "starting" || phase === "calling" || phase === "connected" || phase === "testing" || phase === "relay" || pttProcess.running || pttProcess.exitSeen
     readonly property int pollInterval: fastPolling ? 500 : (onlineState ? 1500 : 10000)
 
+    function safePlainText(value, limit) {
+        var maximum = Math.max(1, Number(limit || 180));
+        var text = String(value || "");
+        // Strip terminal colour/control sequences and the CLI's fixed prefix.
+        text = text.replace(/\x1b\][^\x07]*(?:\x07|\x1b\\)/g, "");
+        text = text.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+        text = text.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "");
+        text = text.replace(/[\r\n\t]+/g, " ").replace(/\s+/g, " ").trim();
+        text = text.replace(/^omaphone\s*:\s*/i, "").replace(/^error\s*:\s*/i, "").trim();
+        if (text.length > maximum)
+            text = text.substring(0, maximum - 1).trim() + "…";
+
+        return text;
+    }
+
+    function actionFailureMessage(kind, stderrText) {
+        // Dependency/setup tools can emit package-manager output. Never place
+        // that raw output in the panel; only the small phone-action surface is
+        // defined to return friendly, bounded errors.
+        var maySurfaceDetail = ["call", "call-peer", "join", "clear-peer"].indexOf(String(kind || "")) >= 0;
+        var rawError = String(stderrText || "").replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "").replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, "").trim();
+        var knownBackendError = /^omaphone\s*:/i.test(rawError);
+        var detail = maySurfaceDetail && knownBackendError ? safePlainText(rawError, 180) : "";
+        if (["join", "call-peer"].indexOf(String(kind || "")) >= 0)
+            detail = detail.replace(/Omaphone invite/gi, "private contact card").replace(/\binvite\b/gi, "contact card");
+
+        if (detail !== "")
+            detail = detail.charAt(0).toUpperCase() + detail.substring(1);
+
+        return detail !== "" ? detail : failureLabel(kind);
+    }
+
+    function cueCommand(kind) {
+        if (kind === "outgoing")
+            return ["play", "-q", "-n", "synth", "0.10", "sine", "420", "vol", "0.18"];
+
+        if (kind === "connected")
+            return ["play", "-q", "-n", "synth", "0.18", "sine", "440-660", "vol", "0.22"];
+
+        if (kind === "failure")
+            return ["play", "-q", "-n", "synth", "0.16", "sine", "190", "vol", "0.20"];
+
+        return ["play", "-q", "-n", "synth", "0.10", "sine", "300-230", "vol", "0.18"];
+    }
+
+    function queueCue(kind, visibleText) {
+        cueText = safePlainText(visibleText, 80);
+        cueTextTimer.restart();
+        if (String(phoneStatus.settings && phoneStatus.settings.chime || "tone") === "off")
+            return ;
+
+        var nextQueue = cueQueue.slice(0);
+        if (nextQueue.length < 3)
+            nextQueue.push(String(kind || "end"));
+
+        cueQueue = nextQueue;
+        driveCue();
+    }
+
+    function driveCue() {
+        if (cueProcess.running || cueProcess.startPending || cueQueue.length === 0)
+            return ;
+
+        var nextQueue = cueQueue.slice(0);
+        var kind = String(nextQueue.shift() || "end");
+        cueQueue = nextQueue;
+        cueProcess.startPending = true;
+        cueProcess.command = cueCommand(kind);
+        cueProcess.running = true;
+        cueStartTimeout.restart();
+    }
+
+    function handleCallTransition(previousPhase, previousOutcomeSequence) {
+        var currentPhase = String(phoneStatus.phase || "");
+        var currentOutcomeSequence = Number(phoneStatus.callOutcomeSequence || 0);
+        if (currentOutcomeSequence > previousOutcomeSequence && ["failed", "timeout"].indexOf(String(phoneStatus.lastCallOutcome || "")) >= 0) {
+            queueCue("failure", String(phoneStatus.lastCallMessage || "Call failed"));
+            endingCall = false;
+            return ;
+        }
+        if (currentPhase === "connected" && previousPhase !== "connected") {
+            queueCue("connected", previousPhase === "listening" ? "Incoming call connected" : "Call connected");
+            endingCall = false;
+        } else if (previousPhase === "connected" && currentPhase !== "connected") {
+            queueCue("end", "Call ended");
+            endingCall = false;
+        } else if (endingCall && previousPhase === "calling" && currentPhase !== "calling") {
+            queueCue("end", "Call ended");
+            endingCall = false;
+        }
+    }
+
     function applyStatus(raw) {
+        var hadStatus = statusLoaded;
+        var previousPhase = phase;
+        var previousOutcomeSequence = Number(phoneStatus.callOutcomeSequence || 0);
         var parsed;
         try {
             parsed = JSON.parse(String(raw || ""));
@@ -97,6 +206,12 @@ Item {
             "hmac": rawSettings.hmac !== false
         };
         var safeRoomSize = typeof parsed.roomSize === "number" && isFinite(parsed.roomSize) ? Math.max(0, Math.min(10000, Math.floor(parsed.roomSize))) : 0;
+        var pairedAddress = addressIsSafe(parsed.pairedAddress) ? String(parsed.pairedAddress).toLowerCase() : "";
+        var preferredRole = ["caller", "listener"].indexOf(String(parsed.preferredRole || "")) >= 0 ? String(parsed.preferredRole) : "";
+        var callStage = ["preparing", "opening-tor", "dialing"].indexOf(String(parsed.callStage || "")) >= 0 ? String(parsed.callStage) : "";
+        var torProgress = typeof parsed.torProgress === "number" && isFinite(parsed.torProgress) ? Math.max(0, Math.min(100, Math.floor(parsed.torProgress))) : 0;
+        var lastCallOutcome = ["failed", "timeout"].indexOf(String(parsed.lastCallOutcome || "")) >= 0 ? String(parsed.lastCallOutcome) : "";
+        var callOutcomeSequence = typeof parsed.callOutcomeSequence === "number" && isFinite(parsed.callOutcomeSequence) ? Math.max(0, Math.floor(parsed.callOutcomeSequence)) : 0;
         phoneStatus = {
             "schemaVersion": Number(parsed.schemaVersion || 1),
             "backendVersion": String(parsed.backendVersion || ""),
@@ -112,6 +227,15 @@ Item {
             "busy": parsed.busy === true,
             "onion": String(parsed.onion || ""),
             "remoteAddress": String(parsed.remoteAddress || ""),
+            "pairedAddress": pairedAddress,
+            "hasPeer": parsed.hasPeer === true && pairedAddress !== "",
+            "preferredRole": preferredRole,
+            "selfPeer": parsed.selfPeer === true,
+            "callStage": callStage,
+            "torProgress": torProgress,
+            "lastCallOutcome": lastCallOutcome,
+            "lastCallMessage": safePlainText(parsed.lastCallMessage, 220),
+            "callOutcomeSequence": callOutcomeSequence,
             "groupCall": parsed.groupCall === true,
             "roomSize": safeRoomSize,
             "relayReady": parsed.relayReady === true && String(parsed.phase || "") === "relay",
@@ -119,13 +243,22 @@ Item {
             "remoteTalking": parsed.remoteTalking === true,
             "messages": safeMessages,
             "settings": safeSettings,
-            "lastError": String(parsed.lastError || "")
+            "lastError": safePlainText(parsed.lastError, 220)
         };
         if (notice === "Starting group host…" && (phoneStatus.relayReady === true || String(phoneStatus.phase || "") !== "relay"))
             notice = "";
 
         statusLoaded = true;
         statusReadError = "";
+        if (hadStatus)
+            handleCallTransition(previousPhase, previousOutcomeSequence);
+
+        if (inviteAndWaitPending) {
+            if (phase === "listening")
+                maybeCopyWaitingCard();
+            else if (phase === "error")
+                inviteAndWaitPending = false;
+        }
         if (!pttProcess.running) {
             pttApplied = phoneStatus.localTalking ? 1 : 0;
             if (pttDesired !== pttApplied)
@@ -157,16 +290,19 @@ Item {
             return "Missing tools installed";
 
         if (kind === "online")
-            return "Going online…";
+            return "Waiting for calls…";
 
         if (kind === "offline")
             return "Omaphone is offline";
 
-        if (kind === "call")
+        if (kind === "call" || kind === "call-peer")
             return "Calling…";
 
-        if (kind === "pair")
-            return onlineState ? "Invite ready — choose Call to connect" : "Invite ready — go online, then choose Call";
+        if (kind === "join")
+            return "Phone added — connecting…";
+
+        if (kind === "clear-peer")
+            return "Paired phone cleared";
 
         if (kind === "audio-test")
             return "Audio test started";
@@ -202,8 +338,14 @@ Item {
         if (kind === "send")
             return "Message was not sent";
 
-        if (kind === "pair")
-            return "Could not use that invite";
+        if (kind === "join")
+            return "Could not add that phone";
+
+        if (kind === "call-peer")
+            return "Could not call the paired phone";
+
+        if (kind === "clear-peer")
+            return "Could not clear the paired phone";
 
         if (kind === "call")
             return "Could not place the call";
@@ -229,7 +371,9 @@ Item {
         actionProcess.kind = String(kind || "action");
         actionProcess.input = String(stdinText || "");
         actionProcess.output = "";
+        actionProcess.errorOutput = "";
         actionProcess.outputReady = false;
+        actionProcess.errorReady = false;
         actionProcess.exitSeen = false;
         actionProcess.startedOk = false;
         actionProcess.startPending = true;
@@ -240,6 +384,9 @@ Item {
         actionStartTimeout.restart();
         actionWatchdog.interval = kind === "install-deps" ? 600000 : (kind === "setup" ? 60000 : 30000);
         actionWatchdog.restart();
+        if (["call", "call-peer", "join"].indexOf(String(kind || "")) >= 0)
+            queueCue("outgoing", "Calling");
+
         return true;
     }
 
@@ -258,16 +405,20 @@ Item {
     }
 
     function goOnline() {
-        if (!ready || snowflakeBlocked || onlineState || commandBusy)
+        if (!ready || snowflakeBlocked || commandBusy || phase === "calling" || phase === "connected" || phase === "relay")
+            return false;
+
+        if (onlineState && String(phoneStatus.preferredRole || "") === "listener")
             return false;
 
         return runAction(["online"], "", "online");
     }
 
     function goOffline() {
-        if (!onlineState || commandBusy)
+        if (!onlineState || actionBusy || clipboardBusy)
             return false;
 
+        inviteAndWaitPending = false;
         requestPtt(false);
         return runAction(["offline"], "", "offline");
     }
@@ -286,37 +437,79 @@ Item {
         if (commandBusy)
             return false;
 
-        if (!onlineState || phase !== "listening") {
-            actionError = "Go online before placing a call";
-            return false;
-        }
         var address = String(value || "").trim();
         if (!addressIsSafe(address)) {
-            actionError = "Paste a full 56-character .onion calling address here; use invite codes under Use an invite";
+            actionError = "Paste a full 56-character .onion calling address";
             return false;
         }
         return runAction(["call", address], "", "call");
     }
 
-    function pairInvite(value) {
+    function join(value) {
         if (commandBusy)
             return false;
 
         var invite = String(value || "").trim();
         if (invite === "") {
-            actionError = "Paste an invite code first";
+            actionError = "Paste their private contact card first";
             return false;
         }
         // The opaque invite (and its embedded room secret) never enters argv.
-        return runAction(["pair"], invite, "pair");
+        return runAction(["join"], invite, "join");
     }
 
-    function copyInvite() {
+    function pairInvite(value) {
+        return join(value);
+    }
+
+    function callPeer() {
+        if (commandBusy)
+            return false;
+
+        return runAction(["call-peer"], "", "call-peer");
+    }
+
+    function clearPeer() {
+        if (commandBusy)
+            return false;
+
+        inviteAndWaitPending = false;
+        return runAction(["clear-peer"], "", "clear-peer");
+    }
+
+    function inviteAndWait() {
+        if (!ready || snowflakeBlocked || commandBusy)
+            return false;
+
+        actionError = "";
+        notice = phase === "listening" ? "Preparing private contact card…" : "Opening a private line…";
+        inviteAndWaitPending = true;
+        if (phase === "listening") {
+            maybeCopyWaitingCard();
+            return true;
+        }
+        if (!goOnline()) {
+            inviteAndWaitPending = false;
+            return false;
+        }
+        return true;
+    }
+
+    function maybeCopyWaitingCard() {
+        if (!inviteAndWaitPending || phase !== "listening" || String(phoneStatus.onion || "") === "")
+            return ;
+
+        if (copyInvite(true))
+            inviteAndWaitPending = false;
+
+    }
+
+    function copyInvite(waitingCard) {
         // A relay is a long-lived TerminalPhone session and therefore reports
         // busy, but creating an invite only packages the room key that the
         // supervisor already made for this session. Keep it available to the
         // host while blocking overlapping helpers and every other busy phase.
-        if (actionBusy || clipboardBusy || (phoneStatus.busy === true && phase !== "relay"))
+        if (actionBusy || clipboardBusy || (phoneStatus.busy === true && phase !== "relay" && phase !== "listening"))
             return false;
 
         if (String(phoneStatus.onion || "") === "")
@@ -325,6 +518,7 @@ Item {
         actionError = "";
         notice = "";
         inviteProcess.output = "";
+        inviteProcess.waitingCard = waitingCard === true;
         inviteProcess.startedOk = false;
         inviteProcess.startPending = true;
         inviteProcess.command = ["python3", helperPath, "invite"];
@@ -346,6 +540,7 @@ Item {
 
     function hangup() {
         requestPtt(false);
+        endingCall = phase === "calling" || phase === "connected";
         return runAction(["hangup"], "", "hangup");
     }
 
@@ -391,15 +586,16 @@ Item {
         return runAction(["clear-chat"], "", "clear-chat");
     }
 
-    function copyOpaqueInvite(invite) {
+    function copyOpaqueInvite(invite, waitingCard) {
         var value = String(invite || "").trim();
         if (value.indexOf("omaphone:v1:") !== 0 || clipboardProcess.running) {
-            actionError = "Omaphone did not produce a valid invite";
+            actionError = waitingCard ? "Omaphone did not produce a valid private contact card" : "Omaphone did not produce a valid invite";
             return ;
         }
         // The fragment is fixed; the opaque invite is written only on stdin.
         // read exits after one newline and therefore closes wl-copy's input.
         clipboardProcess.payload = value;
+        clipboardProcess.waitingCard = waitingCard === true;
         clipboardProcess.startedOk = false;
         clipboardProcess.startPending = true;
         clipboardProcess.command = ["bash", "-c", "IFS= read -r line; printf %s \"$line\" | wl-copy"];
@@ -457,26 +653,42 @@ Item {
     }
 
     function finishActionProcess() {
-        if (!actionProcess.exitSeen || !actionProcess.outputReady)
+        if (!actionProcess.exitSeen || !actionProcess.outputReady || !actionProcess.errorReady)
             return ;
 
         actionWatchdog.stop();
         var exitCode = actionProcess.exitCodeValue;
         var finishedKind = actionProcess.kind;
         var finishedOutput = actionProcess.output;
+        var finishedError = actionProcess.errorOutput;
+        var timedOut = actionProcess.timedOut;
         actionProcess.kind = "";
         actionProcess.input = "";
         actionProcess.output = "";
+        actionProcess.errorOutput = "";
         actionProcess.exitSeen = false;
         actionProcess.outputReady = false;
+        actionProcess.errorReady = false;
         actionProcess.startPending = false;
         if (exitCode === 0) {
-            actionError = "";
-            applyStatus(finishedOutput);
-            notice = successNotice(finishedKind);
-        } else if (!actionProcess.timedOut) {
-            actionError = failureLabel(finishedKind);
+            if (applyStatus(finishedOutput)) {
+                actionError = "";
+                notice = successNotice(finishedKind);
+                if (finishedKind === "join")
+                    joinSuccessSequence++;
+
+            } else {
+                actionError = failureLabel(finishedKind);
+            }
+        } else if (!timedOut) {
+            actionError = actionFailureMessage(finishedKind, finishedError);
+            if (["call", "call-peer", "join"].indexOf(finishedKind) >= 0)
+                queueCue("failure", actionError);
+
         }
+        if (finishedKind === "online" && exitCode !== 0)
+            inviteAndWaitPending = false;
+
         refresh();
         settleRefresh.restart();
     }
@@ -512,13 +724,41 @@ Item {
 
     }
     Component.onCompleted: refresh()
-    Component.onDestruction: requestPtt(false)
+    Component.onDestruction: {
+        requestPtt(false);
+        cueQueue = [];
+        if (cueProcess.running)
+            cueProcess.signal(15);
+
+    }
 
     Timer {
         interval: root.pollInterval
         running: true
         repeat: true
         onTriggered: root.refresh()
+    }
+
+    Timer {
+        id: cueTextTimer
+
+        interval: 2600
+        repeat: false
+        onTriggered: root.cueText = ""
+    }
+
+    Timer {
+        id: cueStartTimeout
+
+        interval: 1500
+        repeat: false
+        onTriggered: {
+            if (cueProcess.running || !cueProcess.startPending)
+                return ;
+
+            cueProcess.startPending = false;
+            root.driveCue();
+        }
     }
 
     Timer {
@@ -578,6 +818,12 @@ Item {
             actionProcess.timedOut = true;
             root.notice = "";
             root.actionError = root.failureLabel(actionProcess.kind) + " (timed out)";
+            if (["call", "call-peer", "join"].indexOf(actionProcess.kind) >= 0)
+                root.queueCue("failure", root.actionError);
+
+            if (actionProcess.kind === "online")
+                root.inviteAndWaitPending = false;
+
             if (actionProcess.running)
                 actionProcess.signal(9);
 
@@ -635,13 +881,21 @@ Item {
             // an invite or message cannot remain in the long-lived shell object.
             actionProcess.input = "";
             actionProcess.output = "";
+            actionProcess.errorOutput = "";
             actionProcess.outputReady = false;
+            actionProcess.errorReady = false;
             actionProcess.exitSeen = false;
             actionProcess.startPending = false;
             actionProcess.kind = "";
             actionWatchdog.stop();
             root.notice = "";
             root.actionError = root.failureLabel(failedKind);
+            if (["call", "call-peer", "join"].indexOf(failedKind) >= 0)
+                root.queueCue("failure", root.actionError);
+
+            if (failedKind === "online")
+                root.inviteAndWaitPending = false;
+
         }
     }
 
@@ -654,10 +908,12 @@ Item {
             if (inviteProcess.startedOk || inviteProcess.running)
                 return ;
 
+            var waitingCardCopy = inviteProcess.waitingCard;
             inviteProcess.output = "";
+            inviteProcess.waitingCard = false;
             inviteProcess.startPending = false;
             root.notice = "";
-            root.actionError = "Could not create an invite";
+            root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create an invite";
         }
     }
 
@@ -670,10 +926,12 @@ Item {
             if (clipboardProcess.startedOk || clipboardProcess.running)
                 return ;
 
+            var waitingCardCopy = clipboardProcess.waitingCard;
             clipboardProcess.payload = "";
+            clipboardProcess.waitingCard = false;
             clipboardProcess.startPending = false;
             root.notice = "";
-            root.actionError = "Could not copy the invite";
+            root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the invite";
         }
     }
 
@@ -683,8 +941,10 @@ Item {
         interval: 30000
         repeat: false
         onTriggered: {
+            var waitingCardCopy = inviteProcess.waitingCard;
             inviteProcess.output = "";
-            root.actionError = "Could not create an invite (timed out)";
+            inviteProcess.waitingCard = false;
+            root.actionError = waitingCardCopy ? "Could not create the private contact card (timed out)" : "Could not create an invite (timed out)";
             if (inviteProcess.running)
                 inviteProcess.signal(9);
 
@@ -697,8 +957,10 @@ Item {
         interval: 30000
         repeat: false
         onTriggered: {
+            var waitingCardCopy = clipboardProcess.waitingCard;
             clipboardProcess.payload = "";
-            root.actionError = "Could not copy the invite (timed out)";
+            clipboardProcess.waitingCard = false;
+            root.actionError = waitingCardCopy ? "Could not copy the private contact card (timed out)" : "Could not copy the invite (timed out)";
             if (clipboardProcess.running)
                 clipboardProcess.signal(9);
 
@@ -740,7 +1002,9 @@ Item {
         property string kind: ""
         property string input: ""
         property string output: ""
+        property string errorOutput: ""
         property bool outputReady: false
+        property bool errorReady: false
         property bool exitSeen: false
         property bool startedOk: false
         property bool startPending: false
@@ -774,6 +1038,31 @@ Item {
             }
         }
 
+        stderr: StdioCollector {
+            waitForEnd: true
+            onStreamFinished: {
+                actionProcess.errorOutput = String(text || "");
+                actionProcess.errorReady = true;
+                root.finishActionProcess();
+            }
+        }
+
+    }
+
+    Process {
+        id: cueProcess
+
+        property bool startPending: false
+
+        onStarted: {
+            startPending = false;
+            cueStartTimeout.stop();
+        }
+        onExited: function(exitCode) {
+            startPending = false;
+            cueStartTimeout.stop();
+            root.driveCue();
+        }
     }
 
     // Invites contain the room secret. SplitParser emits a line without
@@ -782,6 +1071,7 @@ Item {
         id: inviteProcess
 
         property string output: ""
+        property bool waitingCard: false
         property bool startedOk: false
         property bool startPending: false
 
@@ -795,12 +1085,14 @@ Item {
             startPending = false;
             inviteWatchdog.stop();
             var invite = output;
+            var waitingCardCopy = waitingCard;
             output = "";
+            waitingCard = false;
             if (exitCode === 0) {
-                root.copyOpaqueInvite(invite);
+                root.copyOpaqueInvite(invite, waitingCardCopy);
             } else {
                 root.notice = "";
-                root.actionError = "Could not create an invite";
+                root.actionError = waitingCardCopy ? "Could not create the private contact card" : "Could not create an invite";
             }
             root.refresh();
         }
@@ -817,6 +1109,7 @@ Item {
         id: clipboardProcess
 
         property string payload: ""
+        property bool waitingCard: false
         property bool startedOk: false
         property bool startPending: false
 
@@ -832,15 +1125,17 @@ Item {
         onExited: function(exitCode) {
             startPending = false;
             clipboardWatchdog.stop();
+            var waitingCardCopy = waitingCard;
             // This is the sole temporary property that contains our own opaque
             // invite. Clear it as soon as the stdin-to-wl-copy bridge exits.
             payload = "";
             if (exitCode === 0) {
-                root.notice = "Invite copied";
+                root.notice = waitingCardCopy ? "Contact card copied — send it privately and leave this computer waiting." : "Invite copied";
             } else {
                 root.notice = "";
-                root.actionError = "Could not copy the invite";
+                root.actionError = waitingCardCopy ? "Could not copy the private contact card" : "Could not copy the invite";
             }
+            waitingCard = false;
         }
     }
 
@@ -920,6 +1215,10 @@ Item {
 
         function offline() : string {
             return root.goOffline() ? "ok" : "busy";
+        }
+
+        function setConfig(key: string, value: string) : string {
+            return root.setConfig(key, value) ? "ok" : "busy";
         }
 
         function hangup() : string {
